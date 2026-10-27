@@ -92,8 +92,8 @@ const Tutorial = (() => {
     },
     {
       key: 'shop',
-      title: 'Rest, shop and items',
-      text: 'Resting by the fire heals you. The shop is open while you wait and while you choose. Items are single use, and gold you spend no longer counts toward your score.',
+      title: 'While you wait',
+      text: 'While the DM builds, walk around the hall, say things, and whisper to whoever stands next to you. Tap the merchant to shop. Items are single use, and gold you spend no longer counts toward your score.',
       art: () => `
         <div class="trow end">
           <div class="tcol tight"><div class="tfire">${Sprites.flame(4)}<div class="tlogs"></div></div><span class="tt-sit">${Sprites.sitting(2, 'air', 3)}</span><span class="tfloat heal">+10 HP</span></div>
@@ -119,7 +119,7 @@ const Tutorial = (() => {
     {
       key: 'dm',
       title: 'When you’re the DM',
-      text: 'Split your gold between the doors and spend mana on traps. Mana is your trap budget: you get more every round, and what you don’t spend carries over. Gold nobody takes is yours, so big gold makes great bait.',
+      text: 'Drag gold, traps and fake clues onto the doors. Traps cost mana, your trap budget: you get more every round, and what you don’t spend carries over. Gold nobody takes is yours, so big gold makes great bait.',
       art: () => `
         <div class="trow end">
           <div class="tcol tight">

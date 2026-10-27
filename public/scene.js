@@ -14,6 +14,19 @@ const Scene = (() => {
   let doors = [], actors = {};
   let playing = null;
   let listener = null;
+  let tapHandler = null;
+  let roaming = false;
+  let myId = null;
+  let myLocalAt = 0;
+  let merchant = null, dmBox = null, spot = null, captionEl = null;
+
+  // the waiting-room floor, shared with the server as 0..1 coordinates
+  const FLOOR_TOP = FLOOR + 40, FLOOR_BOT = H - 34, XL = 24;
+  const clamp01 = (v) => Math.max(0, Math.min(1, v));
+  const toPx = (nx, ny) => ({ x: XL + nx * (W - 2 * XL), y: FLOOR_TOP + ny * (FLOOR_BOT - FLOOR_TOP) });
+  const toNorm = (x, y) => ({ x: clamp01((x - XL) / (W - 2 * XL)), y: clamp01((y - FLOOR_TOP) / (FLOOR_BOT - FLOOR_TOP)) });
+  const defaultSpot = (k, m) => ({ x: m <= 1 ? 0.6 : 0.22 + (0.73 * k) / (m - 1), y: 1 });
+  const GHOST_LIFT = 28;
 
   const reduced = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   const sfx = (on, name, ...args) => { if (on && window.Sound) Sound.play(name, ...args); };
@@ -29,6 +42,7 @@ const Scene = (() => {
     inner.className = 'scene-inner';
     root.appendChild(inner);
     new ResizeObserver(fit).observe(root);
+    inner.addEventListener('pointerdown', onScenePointer);
   }
   function fit() {
     const w = root.clientWidth;
@@ -61,16 +75,16 @@ const Scene = (() => {
     const dw = Math.round(Math.min(100, sp * 0.7));
     const dh = Math.round(dw * 1.6);
     const ds = Array.from({ length: nDoors }, (_, i) => ({ cx: left + sp * (i + 0.5), dw, dh }));
-    const x0 = camp.x + 80, x1 = W - 42;
     const hall = {};
     advIds.forEach((id, k) => {
-      const m = advIds.length;
-      hall[id] = { x: m === 1 ? (x0 + x1) / 2 : x0 + (k * (x1 - x0)) / (m - 1), y: H - 34 };
+      const sp0 = defaultSpot(k, advIds.length);
+      hall[id] = toPx(sp0.x, sp0.y);
     });
+    const shop = { x: camp.x, y: FLOOR + 50 };
     const torches = [];
     for (let i = 1; i < nDoors; i++) torches.push(left + sp * i);
     torches.push(left - (narrow ? 6 : 14));
-    return { camp, doors: ds, hall, sp, torches, narrow };
+    return { camp, doors: ds, hall, sp, torches, narrow, shop };
   }
   function doorFront(i, j, cnt, row) {
     const g = geom.doors[i];
@@ -88,7 +102,12 @@ const Scene = (() => {
   }
   function ghostHome(id) {
     const h = geom.hall[id];
-    return { x: h.x, y: FLOOR + 62 };
+    return { x: h.x, y: h.y - GHOST_LIFT };
+  }
+  // where someone stands in the waiting room, in pixels
+  function roamPx(id, p, alive) {
+    const q = toPx(p.x, p.y);
+    return alive ? q : { x: q.x, y: q.y - GHOST_LIFT };
   }
 
   /* ---------- small builders ---------- */
@@ -111,15 +130,24 @@ const Scene = (() => {
         <div class="camp-logs"></div>
       </div>
       <div class="dm" style="left:${geom.camp.x}px">
+        <div class="say" hidden></div>
         <div class="dm-hood">${Sprites.dmHood(geom.narrow ? 4 : 5)}</div>
         <div class="dm-name">DM ${esc(dmName ? dmName.name : '')}</div>
       </div>
-      <div class="vignette"></div>`;
+      <div class="merchant" style="left:${geom.shop.x}px; top:${geom.shop.y}px">
+        <div class="say" hidden></div>
+        <div class="merchant-sprite">${Sprites.merchant(4)}</div>
+        <div class="merchant-name">Merchant</div>
+      </div>
+      <div class="vignette"></div>
+      <div class="spotlight"></div>
+      <div class="scene-caption" hidden></div>`;
   }
 
   function createDoor(i, g) {
     const el = document.createElement('div');
     el.className = 'sdoor';
+    el.dataset.i = String(i);
     el.style.cssText = `left:${g.cx - g.dw / 2}px; top:${FLOOR - g.dh}px; width:${g.dw}px; height:${g.dh}px;`;
     el.innerHTML = `
       <div class="sd-frame"></div>
@@ -143,6 +171,7 @@ const Scene = (() => {
       warn: el.querySelector('.sd-warn'),
       fx: el.querySelector('.sd-fx'),
       gold: el.querySelector('.sd-gold'),
+      plaque: el.querySelector('.sd-plaque'),
       seen: el.querySelector('.sd-seen'),
       inside: el.querySelector('.sd-inside-icon'),
       mark: el.querySelector('.sd-mark'),
@@ -186,9 +215,9 @@ const Scene = (() => {
       (seen.illusion ? '<span class="seen-ill">Illusion</span>' : '');
   }
 
-  function setClickable(door, clickable, selected) {
+  function setClickable(door, clickable, selected, act = 'pickDoor') {
     door.leaf.disabled = !clickable;
-    if (clickable) door.leaf.dataset.act = 'pickDoor';
+    if (clickable) door.leaf.dataset.act = act;
     else delete door.leaf.dataset.act;
     door.el.classList.toggle('selected', !!selected);
     door.leaf.setAttribute('aria-pressed', selected ? 'true' : 'false');
@@ -201,6 +230,7 @@ const Scene = (() => {
     el.innerHTML = `
       <div class="actor-body">
         <div class="bubble" hidden>!</div>
+        <div class="say" hidden></div>
         <div class="pose"><div class="sprite"></div></div>
       </div>
       <div class="nameplate"><span>${esc(name)}</span><i class="mini-hp"><b></b></i></div>`;
@@ -211,6 +241,7 @@ const Scene = (() => {
       pose: el.querySelector('.pose'),
       sprite: el.querySelector('.sprite'),
       bubble: el.querySelector('.bubble'),
+      say: el.querySelector('.say'),
       hp: el.querySelector('.mini-hp'),
       x: pos.x, y: pos.y, moveAnim: null,
     };
@@ -239,8 +270,19 @@ const Scene = (() => {
     b.className = pct <= 30 ? 'low' : pct <= 60 ? 'mid' : '';
   }
   function moveTo(a, x, y, ms, gait, animate) {
-    if (a.moveAnim) { try { a.moveAnim.finish(); } catch (e) { /* already done */ } }
-    const fx0 = a.x, fy0 = a.y;
+    let fx0 = a.x, fy0 = a.y;
+    if (a.moveAnim) {
+      // start from wherever they are right now, not where they were heading
+      if (animate && a.moveAnim.playState === 'running') {
+        const cs = getComputedStyle(a.el);
+        fx0 = parseFloat(cs.left);
+        fy0 = parseFloat(cs.top);
+        a.moveAnim.cancel();
+      } else {
+        try { a.moveAnim.finish(); } catch (e) { /* already done */ }
+      }
+      a.moveAnim = null;
+    }
     if (Math.abs(x - fx0) > 1) a.body.classList.toggle('face-left', x < fx0);
     place(a, x, y);
     if (!animate || ms <= 0 || (Math.abs(x - fx0) < 1 && Math.abs(y - fy0) < 1)) return Promise.resolve();
@@ -285,7 +327,7 @@ const Scene = (() => {
   }
   const rnd = (a, b) => a + Math.random() * (b - a);
 
-  function trapFx(door, trap, animate) {
+  function trapFx(door, trap, animate, slow = 1) {
     if (!animate) return;
     const g = door.g;
     const cx = g.cx, top = FLOOR - g.dh, mid = FLOOR - g.dh / 2;
@@ -317,7 +359,7 @@ const Scene = (() => {
         kf = [{ transform: 'translate(0,0)', opacity: 0.9 }, { transform: `translate(${dir * rnd(90, 190)}px, ${rnd(-20, 20)}px)`, opacity: 0 }];
       }
       parts.push(p);
-      anims.push(p.animate(kf, { duration: dur, delay: rnd(0, 180), easing: 'ease-out', fill: 'both' }));
+      anims.push(p.animate(kf, { duration: dur * slow, delay: rnd(0, 180) * slow, easing: 'ease-out', fill: 'both' }));
     }
     Promise.all(anims.map((a) => a.finished.catch(() => {}))).then(() => parts.forEach((x) => x.remove()));
     if (trap.tier === 'deadly') {
@@ -358,13 +400,13 @@ const Scene = (() => {
     if (!animate) return;
     a.pose.animate([{ transform: 'translate(0,0)' }, { transform: 'translate(0,-8px)' }, { transform: 'translate(0,10px)' }, { transform: 'translate(0,0)' }], { duration: 420 });
   }
-  function openDoor(door, trap, animate) {
+  function openDoor(door, trap, animate, ms = 520) {
     door.el.classList.add('open');
     door.fx.className = 'sd-fx';
     door.fx.innerHTML = '';
     door.inside.innerHTML = trap ? Sprites.icon(trap.element, door.g.dw > 70 ? 5 : 4) : '';
     door.el.classList.toggle('empty', !trap);
-    if (animate) door.leaf.animate([{ transform: 'perspective(500px) rotateY(0deg)' }, { transform: 'perspective(500px) rotateY(-78deg)' }], { duration: 520, easing: 'ease-out' });
+    if (animate) door.leaf.animate([{ transform: 'perspective(500px) rotateY(0deg)' }, { transform: 'perspective(500px) rotateY(-78deg)' }], { duration: ms, easing: 'ease-out' });
   }
 
   /* ---------- the round reveal ---------- */
@@ -393,11 +435,109 @@ const Scene = (() => {
     fx.innerHTML = '';
   }
 
+  /* ---------- spotlight and caption for the reveal ---------- */
+  function spotlightOn(door, animate) {
+    if (!spot) return;
+    if (!door) { spot.classList.remove('on'); return; }
+    const cy = FLOOR - door.g.dh * 0.25;
+    spot.style.background = `radial-gradient(ellipse 150px 170px at ${door.g.cx}px ${cy}px, transparent 55%, rgba(4,5,9,.72) 100%)`;
+    spot.classList.toggle('instant', !animate);
+    spot.classList.add('on');
+  }
+  function caption(text, mine) {
+    if (!captionEl) return;
+    if (!text) { captionEl.hidden = true; return; }
+    captionEl.hidden = false;
+    captionEl.textContent = text;
+    captionEl.classList.toggle('mine', !!mine);
+  }
+
+  async function revealDoor(p, S, r, info, anim, who) {
+    const door = doors[info.index];
+    const trap = info.trap;
+    const deadly = trap && trap.tier === 'deadly';
+    const mine = info.entrants.includes(S.me);
+    const verbs = { sprint: 'sprinted in', walk: 'walked in', sneak: 'sneaked in' };
+    spotlightOn(door, anim());
+    caption(`Door ${ROMAN[info.index]}: ` + info.entrants.map((id) => `${who(id)} ${r.act[id].lock ? 'used a Lock' : verbs[r.act[id].approach]}`).join(', ') + '…', mine);
+    await wait(p, 650);
+
+    // locks and shoves at this door
+    const lockers = info.entrants.filter((id) => r.act[id].lock);
+    let scuffle = false;
+    if (lockers.length) {
+      scuffle = true;
+      door.mark.innerHTML = Sprites.icon('lock', 3);
+      sfx(anim(), 'lock');
+      if (anim()) door.mark.animate([{ transform: 'translate(-50%, 0) scale(2)', opacity: 0 }, { transform: 'translate(-50%, 0) scale(1)', opacity: 1 }], { duration: 300 });
+      info.lockedOut.forEach((id) => { knock(actors[id], anim()); const o = overHead(actors[id]); floatText(o.x, o.y, 'Locked out', 'muted', anim()); });
+    } else {
+      info.entrants.forEach((id) => {
+        const t = r.act[id].shove;
+        if (t && info.entrants.includes(t)) {
+          scuffle = true;
+          lunge(actors[id], actors[t], anim());
+          sfx(anim(), 'shove');
+          const o = overHead(actors[t]);
+          floatText(o.x, o.y, 'Shoved!', 'spite', anim(), 150);
+        }
+      });
+    }
+    if (scuffle) await wait(p, 750);
+
+    // the drumroll, then the door
+    sfx(anim(), 'drumroll', deadly ? 1.3 : 0.8);
+    await wait(p, deadly ? 1300 : 800);
+    openDoor(door, trap, anim(), deadly ? 950 : 520);
+    sfx(anim(), 'door');
+    await wait(p, deadly ? 750 : 420);
+
+    if (trap) {
+      caption(`Door ${ROMAN[info.index]}: ${TIER[trap.tier]} ${cap(trap.element)} trap!`, mine);
+      trapFx(door, trap, anim(), deadly ? 1.7 : 1);
+      sfx(anim(), trap.element, trap.tier !== 'minor');
+      if (deadly) sfx(anim(), 'boom');
+      const hits = Object.entries(info.damage || {});
+      if (hits.length && anim()) setTimeout(() => sfx(true, 'hit'), deadly ? 350 : 150);
+      hits.forEach(([id, dmg]) => {
+        const a = actors[id];
+        hit(a, anim());
+        const o = overHead(a);
+        floatText(o.x, o.y, `−${dmg}`, 'dmg', anim(), deadly ? 350 : 120);
+        setHp(a, r.before[id].hp - dmg, true);
+      });
+    } else {
+      caption(`Door ${ROMAN[info.index]}: no trap!`, mine);
+      floatText(door.g.cx, FLOOR - door.g.dh / 2, 'Empty', 'muted', anim(), 100);
+      sfx(anim(), 'empty');
+    }
+    if (info.illusion !== null) {
+      floatText(door.g.cx, FLOOR - door.g.dh - 10, 'Illusion!', 'spite', anim(), 300);
+      if (anim()) setTimeout(() => sfx(true, 'illusion'), 300);
+    }
+    await wait(p, deadly ? 1700 : 1100);
+
+    // gold for whoever made it
+    const from = { x: door.g.cx, y: FLOOR - door.g.dh * 0.45 };
+    let paid = false;
+    Object.entries(info.share || {}).forEach(([id, sh]) => {
+      if (r.deaths.some((x) => x.id === id) || !sh) return;
+      paid = true;
+      const a = actors[id];
+      coins(from, { x: a.x, y: a.y - 36 }, Math.min(7, 1 + Math.ceil(sh / 15)), anim());
+      if (anim()) setTimeout(() => sfx(true, 'coins', Math.min(6, 1 + Math.ceil(sh / 15))), 350);
+      const o = overHead(a);
+      floatText(o.x, o.y, `+${sh}`, 'gold', anim(), 450);
+    });
+    await wait(p, paid ? 1000 : 300);
+  }
+
   async function playResult(S, r, instant) {
     const p = newPlay();
     if (instant || reduced()) p.skip = true;
     const anim = () => !p.skip;
     const d = S.match.dungeon;
+    const who = (id) => (id === S.me ? 'You' : (S.players.find((x) => x.id === id) || { name: '?' }).name);
     const living = d.advIds.filter((id) => r.before[id].hp > 0);
 
     // where everyone goes
@@ -421,86 +561,31 @@ const Scene = (() => {
       return moveTo(actors[id], t.x, t.y, t.rest ? 1000 : DUR[t.gait], t.gait, anim());
     }));
     resters.forEach((id) => { const a = actors[id]; a.sitting = true; drawSprite(a); });
-    await wait(p, 250);
+    await wait(p, 300);
 
-    // 2. locks and shoves
-    let any = false;
-    r.doors.forEach((info) => {
-      const door = doors[info.index];
-      const lockers = info.entrants.filter((id) => r.act[id].lock);
-      if (lockers.length) {
-        any = true;
-        door.mark.innerHTML = Sprites.icon('lock', 3);
-        sfx(anim(), 'lock');
-        if (anim()) door.mark.animate([{ transform: 'translate(-50%, 0) scale(2)', opacity: 0 }, { transform: 'translate(-50%, 0) scale(1)', opacity: 1 }], { duration: 300 });
-        info.lockedOut.forEach((id) => { knock(actors[id], anim()); const o = overHead(actors[id]); floatText(o.x, o.y, 'Locked out', 'muted', anim()); });
-      } else {
-        info.entrants.forEach((id) => {
-          const t = r.act[id].shove;
-          if (t && info.entrants.includes(t)) {
-            any = true;
-            lunge(actors[id], actors[t], anim());
-            sfx(anim(), 'shove');
-            const o = overHead(actors[t]);
-            floatText(o.x, o.y, 'Shoved!', 'spite', anim(), 150);
-          }
-        });
-      }
-    });
-    if (any) await wait(p, 650);
+    // 2. doors nobody chose open together, quickly
+    const quiet = r.doors.filter((x) => !x.entrants.length);
+    if (quiet.length) {
+      quiet.forEach((info) => openDoor(doors[info.index], info.trap, anim()));
+      sfx(anim(), 'door');
+      await wait(p, 650);
+    }
 
-    // 3. doors open, traps go off
-    r.doors.forEach((info) => openDoor(doors[info.index], info.trap, anim()));
-    sfx(anim(), 'door');
-    await wait(p, 420);
-    let hurt = false, boom = false;
-    r.doors.forEach((info) => {
-      const door = doors[info.index];
-      if (info.trap) {
-        trapFx(door, info.trap, anim());
-        sfx(anim(), info.trap.element, info.trap.tier !== 'minor');
-        if (info.trap.tier === 'deadly') boom = true;
-        if (Object.keys(info.damage || {}).length) hurt = true;
-        Object.entries(info.damage || {}).forEach(([id, dmg]) => {
-          const a = actors[id];
-          hit(a, anim());
-          const o = overHead(a);
-          floatText(o.x, o.y, `−${dmg}`, 'dmg', anim(), 120);
-          setHp(a, r.before[id].hp - dmg, true);
-        });
-      } else if (info.entrants.length) {
-        floatText(door.g.cx, FLOOR - door.g.dh / 2, 'Empty', 'muted', anim(), 100);
-        sfx(anim(), 'empty');
-      }
-      if (info.illusion !== null) {
-        floatText(door.g.cx, FLOOR - door.g.dh - 10, 'Illusion!', 'spite', anim(), 300);
-        if (anim()) setTimeout(() => sfx(true, 'illusion'), 300);
-      }
-    });
-    if (boom) sfx(anim(), 'boom');
-    if (hurt && anim()) setTimeout(() => sfx(true, 'hit'), 150);
-    await wait(p, 1200);
+    // 3. doors people chose open one at a time, the most dramatic last
+    const drama = (x) => (x.trap ? { minor: 1, major: 2, deadly: 3 }[x.trap.tier] * 10 : 0) + x.entrants.length + (x.entrants.includes(S.me) ? 0.5 : 0);
+    const busy = r.doors.filter((x) => x.entrants.length).sort((a, b) => drama(a) - drama(b));
+    for (const info of busy) await revealDoor(p, S, r, info, anim, who);
+    spotlightOn(null);
+    caption(null);
 
-    // 4. gold and rest
-    r.doors.forEach((info) => {
-      const door = doors[info.index];
-      const from = { x: door.g.cx, y: FLOOR - door.g.dh * 0.45 };
-      Object.entries(info.share || {}).forEach(([id, s]) => {
-        if (r.deaths.some((x) => x.id === id) || !s) return;
-        const a = actors[id];
-        coins(from, { x: a.x, y: a.y - 36 }, Math.min(7, 1 + Math.ceil(s / 15)), anim());
-        if (anim()) setTimeout(() => sfx(true, 'coins', Math.min(6, 1 + Math.ceil(s / 15))), 350);
-        const o = overHead(a);
-        floatText(o.x, o.y, `+${s}`, 'gold', anim(), 450);
-      });
-    });
+    // 4. rest by the fire
     if (r.rests.some((x) => x.healed)) sfx(anim(), 'heal');
     r.rests.forEach((x) => {
       const a = actors[x.id];
       if (x.healed) { const o = overHead(a); floatText(o.x, o.y + 18, `+${x.healed} HP`, 'heal', anim()); }
       setHp(a, r.after[x.id].hp, true);
     });
-    await wait(p, 1100);
+    if (r.rests.length) await wait(p, 900);
 
     // 5. ghosts haunt, the dead rise
     if (r.haunts.length) {
@@ -534,7 +619,7 @@ const Scene = (() => {
       moveTo(a, a.x, a.y - 30, 900, 'float', anim());
     });
     if (r.deaths.length) await wait(p, 1300);
-    await wait(p, 700);
+    await wait(p, 600);
 
     if (playing === p) playing = null;
     if (listener) listener();
@@ -561,15 +646,21 @@ const Scene = (() => {
 
     geom = computeGeom(d.doorsCount, d.advIds);
     inner.insertAdjacentHTML('beforeend', backdrop(d, S));
+    merchant = inner.querySelector('.merchant');
+    dmBox = inner.querySelector('.dm');
+    spot = inner.querySelector('.spotlight');
+    captionEl = inner.querySelector('.scene-caption');
     doors = geom.doors.map((g, i) => createDoor(i, g));
     fx = document.createElement('div');
     fx.className = 'fx-layer';
 
     const r = d.lastResult;
     const inReveal = (S.phase === 'results' || S.phase === 'dungeonEnd') && r;
+    const roamPhase = S.phase === 'setup' || S.phase === 'dm';
     d.advs.forEach((a) => {
       const alive = inReveal ? r.before[a.id].hp > 0 : a.alive;
-      const pos = alive ? geom.hall[a.id] : ghostHome(a.id);
+      let pos = alive ? geom.hall[a.id] : ghostHome(a.id);
+      if (roamPhase && d.pos && d.pos[a.id]) pos = roamPx(a.id, d.pos[a.id], alive);
       const ac = makeActor(a.id, nameOf(a.id), colorOf(a.id), a.affinity, alive, pos);
       setHp(ac, inReveal ? r.before[a.id].hp : a.hp, alive);
     });
@@ -588,7 +679,14 @@ const Scene = (() => {
     const role = d.role, phase = S.phase;
     const dm = inner.querySelector('.dm');
     if (dm) dm.classList.toggle('active', phase === 'dm');
+    myId = S.me;
+    const roamPhase = phase === 'setup' || phase === 'dm';
+    roaming = roamPhase && (role === 'adv' || role === 'ghost');
+    root.classList.toggle('roam', roaming);
+    if (merchant) merchant.classList.toggle('open', roamPhase);
     if (phase === 'results' || phase === 'dungeonEnd') return;
+    const building = phase === 'dm' && role === 'dm';
+    root.classList.toggle('building', building);
 
     doors.forEach((door, i) => {
       let face = { unknown: true }, seen = null, clickable = false, selected = false;
@@ -615,7 +713,14 @@ const Scene = (() => {
       }
       setDoorFace(door, face);
       setSeen(door, seen);
-      setClickable(door, clickable, selected);
+      if (building) {
+        setClickable(door, true, false, 'dmDoor');
+        door.plaque.dataset.drag = 'goldFrom';
+        door.plaque.dataset.i = String(i);
+      } else {
+        setClickable(door, clickable, selected);
+        delete door.plaque.dataset.drag;
+      }
     });
 
     d.advs.forEach((a) => {
@@ -627,6 +732,18 @@ const Scene = (() => {
       const showReady = (phase === 'setup' || phase === 'adv') && a.ready && a.id !== S.me;
       ac.bubble.hidden = !showReady;
     });
+
+    // the waiting room: everyone walks to where the server says they are
+    if (roamPhase && d.pos) {
+      d.advs.forEach((a) => {
+        const ac = actors[a.id];
+        const p = d.pos[a.id];
+        if (!ac || !p) return;
+        if (a.id === S.me && Date.now() - myLocalAt < 1500) return;
+        const t = roamPx(a.id, p, a.alive);
+        walk(ac, t, a.alive);
+      });
+    }
 
     // your own sprite previews your choice; nobody else sees it
     if (phase === 'adv' && role === 'adv' && actors[S.me]) {
@@ -699,6 +816,82 @@ const Scene = (() => {
     }
   }
 
+  /* ---------- waiting room ---------- */
+  function walk(ac, t, alive) {
+    const dist = Math.hypot(t.x - ac.x, t.y - ac.y);
+    if (dist < 2) return;
+    moveTo(ac, t.x, t.y, Math.max(250, dist / 0.15), alive ? 'walk' : 'float', !reduced());
+  }
+  function scenePoint(e) {
+    const rect = inner.getBoundingClientRect();
+    const scale = rect.width / W;
+    return { x: (e.clientX - rect.left) / scale, y: (e.clientY - rect.top) / scale };
+  }
+  function onScenePointer(e) {
+    if (!roaming || !tapHandler || e.button > 0) return;
+    const pt = scenePoint(e);
+    if (merchant) {
+      const mx = geom.shop.x, my = geom.shop.y;
+      if (Math.abs(pt.x - mx) < 30 && pt.y > my - 74 && pt.y < my + 8) return tapHandler({ type: 'merchant' });
+    }
+    for (const [id, a] of Object.entries(actors)) {
+      if (id === myId) continue;
+      if (Math.abs(pt.x - a.x) < 24 && pt.y > a.y - 66 && pt.y < a.y + 6) return tapHandler({ type: 'actor', id });
+    }
+    if (pt.y < FLOOR + 10) return;
+    tapHandler({ type: 'floor', ...toNorm(pt.x, pt.y) });
+  }
+  // move your own adventurer right away, before the server echoes it back
+  function walkMe(nx, ny, alive = true) {
+    const me = actors[myId];
+    if (!me) return;
+    myLocalAt = Date.now();
+    walk(me, roamPx(myId, { x: nx, y: ny }, alive), alive);
+  }
+  function setPos(id, nx, ny, alive = true) {
+    if (id === myId && Date.now() - myLocalAt < 1500) return;
+    const a = actors[id];
+    if (a && roaming !== null) walk(a, roamPx(id, { x: nx, y: ny }, alive), alive);
+  }
+  // where to stand to talk to someone: just beside them
+  function besideSpot(p) {
+    return { x: clamp01(p.x + (p.x > 0.5 ? -0.06 : 0.06)), y: p.y };
+  }
+  function merchantSpot() {
+    return toNorm(geom.shop.x + 44, FLOOR_BOT - 6);
+  }
+  function say(id, text, kind = '') {
+    let el = null;
+    if (id === 'merchant') el = merchant && merchant.querySelector('.say');
+    else if (actors[id]) el = actors[id].say;
+    else if (dmBox && last && last.S.match && last.S.match.dungeon && last.S.match.dungeon.dmId === id) el = dmBox.querySelector('.say');
+    if (!el) return;
+    if (kind === 'huddle' && !el.hidden && !el.classList.contains('huddle')) return;
+    // the merchant and the DM stand at the left edge, so their bubbles open to the right
+    const leftEdge = id === 'merchant' || (dmBox && el.parentElement === dmBox);
+    el.textContent = text;
+    el.className = 'say ' + kind + (leftEdge ? ' anchor-left' : '');
+    el.hidden = false;
+    clearTimeout(el._t);
+    el._t = setTimeout(() => { el.hidden = true; }, kind === 'huddle' ? 2200 : 3400);
+    const shift = leftEdge ? '' : 'translateX(-50%) ';
+    if (!reduced()) el.animate([{ transform: shift + 'scale(.6)', opacity: 0 }, { transform: shift + 'scale(1)', opacity: 1 }], { duration: 160, easing: 'ease-out' });
+  }
+
+  /* ---------- DM builder: which door is under the pointer ---------- */
+  function doorAt(clientX, clientY) {
+    if (!inner) return -1;
+    const scale = inner.getBoundingClientRect().width / W;
+    for (const door of doors) {
+      const r = door.el.getBoundingClientRect();
+      if (clientX >= r.left - 8 * scale && clientX <= r.right + 8 * scale && clientY >= r.top - 44 * scale && clientY <= r.bottom + 10 * scale) return door.i;
+    }
+    return -1;
+  }
+  function dropHover(i) {
+    doors.forEach((door) => door.el.classList.toggle('drop-hover', door.i === i));
+  }
+
   function update(S, ui) {
     last = { S, ui };
     if (!root || !S.match || !S.match.dungeon) return;
@@ -719,6 +912,8 @@ const Scene = (() => {
 
   return {
     mount, update, skip, replay,
+    onTap: (fn) => { tapHandler = fn; },
+    walkMe, setPos, say, besideSpot, merchantSpot, doorAt, dropHover,
     isPlaying: () => !!playing,
     onChange: (fn) => { listener = fn; },
   };

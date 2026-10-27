@@ -97,6 +97,17 @@ const Sound = (() => {
     ghost: () => { tone({ type: 'sine', f0: 400, f1: 800, dur: 0.6, vol: 0.1, attack: 0.15 }); tone({ type: 'sine', f0: 403, f1: 760, dur: 0.6, vol: 0.08, attack: 0.15 }); },
     steal: () => { tone({ type: 'sine', f0: 900, f1: 300, dur: 0.35, vol: 0.12 }); FX.coins(2); },
     death: () => { [392, 349, 311, 262].forEach((f, i) => tone({ type: 'triangle', f0: f, dur: 0.25, vol: 0.15, delay: i * 0.16 })); tone({ type: 'sine', f0: 300, f1: 900, dur: 1.0, vol: 0.07, delay: 0.7, attack: 0.3 }); },
+    drumroll: (len = 0.8) => {
+      const n = Math.round(len * 18);
+      let t = 0;
+      for (let i = 0; i < n; i++) {
+        noise({ dur: 0.05, vol: 0.05 + (i / n) * 0.1, type: 'bandpass', f0: 220, q: 2, delay: t });
+        t += Math.max(0.03, 0.08 - i * 0.004);
+      }
+    },
+    pop: () => tone({ type: 'triangle', f0: 880, f1: 1320, dur: 0.08, vol: 0.07 }),
+    whisper: () => noise({ dur: 0.35, vol: 0.06, type: 'bandpass', f0: 3000, f1: 1800, q: 3, attack: 0.08 }),
+    place: () => { tone({ type: 'square', f0: 160, f1: 90, dur: 0.12, vol: 0.12 }); noise({ dur: 0.08, vol: 0.12, type: 'lowpass', f0: 600 }); },
     fanfare: () => { [523, 659, 784, 1047].forEach((f, i) => tone({ type: 'square', f0: f, dur: i === 3 ? 0.6 : 0.16, vol: 0.09, delay: i * 0.14 })); FX.coins(6); },
   };
 

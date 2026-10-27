@@ -2,6 +2,7 @@
 const express = require('express');
 const http = require('http');
 const path = require('path');
+const fs = require('fs');
 const crypto = require('crypto');
 const { Server } = require('socket.io');
 
@@ -22,7 +23,7 @@ const C = {
   REST_HEAL: 10,
 
   // phase lengths in seconds at normal pace; the host picks a pace in the lobby
-  TIME: { setup: 60, dm: 75, adv: 45, results: 30 },
+  TIME: { setup: 60, dm: 75, adv: 45, results: 35 },
   PACE: { relaxed: 1.5, normal: 1, fast: 0.7 },
   DEFAULT_PACE: 'normal',
 
@@ -72,6 +73,55 @@ const WEAK_TO = { fire: 'water', air: 'fire', earth: 'air', water: 'earth' };
 const ITEM_KEYS = ['armour', 'charm', 'lens', 'lock', 'shove'];
 
 // what the client is allowed to know about the config
+/* ============================================================
+   Messages players can say, loaded from messages.txt
+   ============================================================ */
+const MSG_SECTIONS = ['adventurer', 'dm', 'ghost', 'merchant', 'huddle'];
+const MSG_MAX_LEN = 60;
+const MSG_MAX_COUNT = 24;
+function loadMessages(file) {
+  const out = Object.fromEntries(MSG_SECTIONS.map((k) => [k, []]));
+  let text = '';
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch (e) {
+    console.warn('messages.txt not found; using a few built-in messages');
+    text = '[adventurer]\nTrust me.\nLiar!\n[dm]\nMwahaha!\n[ghost]\nI see everything.\n[merchant]\nBuy something!\n[huddle]\nLet\'s both take Door {door}.';
+  }
+  let section = null;
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    const head = line.match(/^\[([a-z]+)\]$/i);
+    if (head) {
+      section = MSG_SECTIONS.includes(head[1].toLowerCase()) ? head[1].toLowerCase() : null;
+      continue;
+    }
+    if (section && out[section].length < MSG_MAX_COUNT) out[section].push(line.slice(0, MSG_MAX_LEN));
+  }
+  return out;
+}
+const MESSAGES = loadMessages(path.join(__dirname, 'messages.txt'));
+
+// the waiting room: positions are 0..1 across the hall floor, the same on every screen
+const ROOM = {
+  NEAR: 70, // how close two adventurers must stand to huddle, in an 800-wide hall
+  FLOOR_W: 752,
+  FLOOR_H: 41,
+  EMOTE_COOLDOWN_MS: 2500,
+  WHISPER_COOLDOWN_MS: 2000,
+  MOVE_MIN_MS: 90,
+};
+function defaultSpot(k, m) {
+  return { x: m <= 1 ? 0.6 : 0.22 + (0.73 * k) / (m - 1), y: 1 };
+}
+function nearEnough(a, b) {
+  if (!a || !b) return false;
+  const dx = (a.x - b.x) * ROOM.FLOOR_W;
+  const dy = (a.y - b.y) * ROOM.FLOOR_H;
+  return Math.hypot(dx, dy) <= ROOM.NEAR;
+}
+
 const PUBLIC_CONFIG = {
   MIN_PLAYERS: C.MIN_PLAYERS, MAX_PLAYERS: C.MAX_PLAYERS,
   MIN_ROUNDS: C.MIN_ROUNDS, MAX_ROUNDS: C.MAX_ROUNDS,
@@ -82,6 +132,7 @@ const PUBLIC_CONFIG = {
   RESIST: C.RESIST, WEAK: C.WEAK, CHARM: C.CHARM, ARMOUR: C.ARMOUR,
   HAUNT_STEAL: C.HAUNT_STEAL, DEATH_DROP: C.DEATH_DROP, SHOP: C.SHOP,
   TIME: C.TIME, PACE: C.PACE, DM_START_MANA: C.DM_START_MANA,
+  MESSAGES, NEAR: ROOM.NEAR, FLOOR_W: ROOM.FLOOR_W, FLOOR_H: ROOM.FLOOR_H,
   ELEMENTS, WEAK_TO,
 };
 
@@ -205,7 +256,7 @@ function startDungeon(room) {
   m.dungeon = {
     dmId, advIds, doorsCount, rounds, round: 0, P, mana: C.DM_START_MANA, budget: 0, adv,
     doors: null, draft: null, actions: {}, haunts: {}, ghostDone: {}, lens: {},
-    lastResult: null, scores: null, history: [], awards: null,
+    lastResult: null, scores: null, history: [], awards: null, pos: {},
   };
   m.log.dungeons.push({
     dungeon: m.dIndex + 1,
@@ -219,6 +270,7 @@ function startDungeon(room) {
     scores: null,
     awards: null,
   });
+  resetSpots(m.dungeon);
   setPhase(room, 'setup', phaseTime(room, 'setup'), () => endSetup(room));
   broadcast(room);
 }
@@ -233,6 +285,12 @@ function shopLog(room, id, what) {
 }
 const ROMAN = ['I', 'II', 'III', 'IV', 'V', 'VI'];
 const trapText = (t) => (t ? `${C.TRAPS[t.tier].name} ${t.element}` : null);
+
+function resetSpots(d) {
+  d.pos = {};
+  d.advIds.forEach((id, k) => (d.pos[id] = defaultSpot(k, d.advIds.length)));
+}
+const canRoam = (phase) => phase === 'setup' || phase === 'dm';
 
 function endSetup(room) {
   const d = room.match.dungeon;
@@ -253,6 +311,7 @@ function startRound(room) {
   d.ghostDone = {};
   d.lens = {};
   d.lastResult = null;
+  resetSpots(d);
   setPhase(room, 'dm', phaseTime(room, 'dm'), () => dmTimeout(room));
   broadcast(room);
 }
@@ -746,6 +805,7 @@ function viewFor(room, p) {
     const s = d.adv[p.id];
     dv.mine = { inv: s.inv, potions: s.potions, affinity: s.affinity, setupReady: s.setupReady, action: d.actions[p.id] || null, lens: d.lens[p.id] || [] };
   }
+  dv.pos = d.pos;
   v.match.dungeon = dv;
   return v;
 }
@@ -988,6 +1048,53 @@ io.on('connection', (socket) => {
         broadcast(room);
       }
     }
+  });
+
+  /* ---------- waiting room ---------- */
+  socket.on('move', ({ x, y } = {}) => {
+    const { room, player, d } = ctx(socket);
+    if (!d || !canRoam(room.phase) || !d.adv[player.id]) return;
+    x = Number(x); y = Number(y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    const now = Date.now();
+    if (player.lastMove && now - player.lastMove < ROOM.MOVE_MIN_MS) return;
+    player.lastMove = now;
+    const spot = { x: Math.max(0, Math.min(1, x)), y: Math.max(0, Math.min(1, y)) };
+    d.pos[player.id] = spot;
+    io.to(room.code).emit('pos', { id: player.id, ...spot });
+  });
+
+  socket.on('emote', ({ i } = {}) => {
+    const { room, player, d } = ctx(socket);
+    if (!d || !['setup', 'dm', 'adv', 'results', 'dungeonEnd'].includes(room.phase)) return;
+    const role = player.id === d.dmId ? 'dm' : d.adv[player.id] ? (d.adv[player.id].alive ? 'adventurer' : 'ghost') : null;
+    const text = role && MESSAGES[role][i];
+    if (!text) return;
+    const now = Date.now();
+    if (player.lastEmote && now - player.lastEmote < ROOM.EMOTE_COOLDOWN_MS) return;
+    player.lastEmote = now;
+    io.to(room.code).emit('emote', { id: player.id, text });
+  });
+
+  socket.on('whisper', ({ to, i, door } = {}, cb) => {
+    const { room, player, d } = ctx(socket);
+    if (!d || !canRoam(room.phase)) return reply(cb, { error: 'You can only huddle while the DM is building.' });
+    if (!d.adv[player.id] || !d.adv[to] || to === player.id) return reply(cb, { error: 'Pick someone to whisper to.' });
+    if (!nearEnough(d.pos[player.id], d.pos[to])) return reply(cb, { error: 'Walk right next to them first.' });
+    let text = MESSAGES.huddle[i];
+    if (!text) return reply(cb, { error: 'Pick a message.' });
+    if (text.includes('{door}')) {
+      if (!Number.isInteger(door) || door < 0 || door >= d.doorsCount) return reply(cb, { error: 'Pick a door.' });
+      text = text.split('{door}').join(ROMAN[door]);
+    }
+    const now = Date.now();
+    if (player.lastWhisper && now - player.lastWhisper < ROOM.WHISPER_COOLDOWN_MS) return reply(cb, { error: 'Easy, not so fast.' });
+    player.lastWhisper = now;
+    const target = room.players.find((p) => p.id === to);
+    if (target && target.socketId) io.to(target.socketId).emit('whisper', { from: player.id, text });
+    // everyone else only sees that the two of them are huddled
+    io.to(room.code).emit('huddle', { a: player.id, b: to });
+    reply(cb, { ok: true, text });
   });
 
   socket.on('guideDone', () => {

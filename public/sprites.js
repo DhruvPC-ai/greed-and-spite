@@ -93,6 +93,28 @@ const Sprites = (() => {
     return pix(GHOST_A, pal, scale, 'f1') + pix(GHOST_B, pal, scale, 'f2');
   }
 
+  const MERCHANT = [
+    '....HHHH....',
+    '...HHHHHH...',
+    '.HHHHHHHHHH.',
+    '...SSSSSS...',
+    '...SKSSKS...',
+    '...SSSSSS...',
+    '...SWWWWS...',
+    '..BBWWWWBB..',
+    'PPPCCCCCCPPP',
+    'PPPCCYYCCPPP',
+    'PPPCCCCCCPPP',
+    'PPP.CCCC.PPP',
+    '....LL.LL...',
+    '....LL.LL...',
+    '...KKK.KKK..',
+    '............',
+  ];
+  function merchant(scale = 4) {
+    return pix(MERCHANT, { H: '#6b3f8f', S: '#f0c8a0', K: '#1d1620', W: '#e8e2d0', B: '#5a3d1e', C: '#4a7a5a', P: '#8a5a2b', Y: '#f5c542', L: '#3d3550' }, scale, '');
+  }
+
   const HOOD = [
     '........KKKKKKKK........',
     '......KKKKKKKKKKKK......',
@@ -129,6 +151,7 @@ const Sprites = (() => {
     potion: [['...KK...', '...WW...', '...WW...', '..WRRW..', '.WRRRRW.', '.WRWRRW.', '.WRRRRW.', '..WWWW..'], { K: '#6b4423', W: '#cfd8e6', R: '#e0524a' }],
     bag: [['...KK...', '..K..K..', '...KK...', '..GGGG..', '.GGYYGG.', 'GGYGGYGG', 'GGGGGGGG', '.GGGGGG.'], { K: '#5a3d1e', G: '#9b7440', Y: '#f5c542' }],
     pointer: [['..WWWW..', '..WWWW..', '..WWWW..', 'WWWWWWWW', '.WWWWWW.', '..WWWW..', '...WW...', '........'], { W: '#f2c14e' }],
+    erase: [['R......R', '.R....R.', '..R..R..', '...RR...', '...RR...', '..R..R..', '.R....R.', 'R......R'], { R: '#e0524a' }],
     zz: [['ZZZZ....', '..Z.....', '.Z......', 'ZZZZ.ZZZ', '......Z.', '.....ZZZ', '........', '........'], { Z: '#c3b6ff' }],
   };
   function icon(name, scale = 3) {
@@ -139,5 +162,5 @@ const Sprites = (() => {
   const FLAME = [['..Y...', '.YY.Y.', '.YOY..', 'YOOOY.', 'YORROY', '.YRRY.'], { Y: '#ffd45e', O: '#ff9a2e', R: '#e8552b' }];
   function flame(scale = 4) { return pix(FLAME[0], FLAME[1], scale, ''); }
 
-  return { CLOAKS, ELEMENT, adventurer, sitting, portrait, ghost, dmHood, icon, flame };
+  return { CLOAKS, ELEMENT, adventurer, sitting, portrait, ghost, dmHood, merchant, icon, flame };
 })();

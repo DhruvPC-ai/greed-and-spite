@@ -1,0 +1,82 @@
+# Greed & Spite: things players can say
+#
+# Edit freely, then push to GitHub. Render redeploys and the new lines appear.
+# One message per line. Lines starting with # are comments. Blank lines are ignored.
+# Keep messages short: anything over 60 characters is cut off. Up to 24 per section.
+#
+# [adventurer]  quick messages living adventurers can say out loud
+# [dm]          quick messages the dungeon master can say
+# [ghost]       quick messages dead adventurers can say
+# [merchant]    what the merchant by the campfire says now and then
+# [huddle]      private messages for someone standing right next to you.
+#               {door} becomes a door number the speaker picks.
+
+[adventurer]
+Trust me.
+Liar!
+After you. I insist.
+I have a really good feeling about this.
+That door is safe. Probably.
+I'm not greedy, I'm ambitious.
+Who else smells smoke?
+Race you!
+Nobody touch my gold.
+I will remember this.
+Shove me and see what happens.
+Gold is temporary. Spite is forever.
+Sneaking. Obviously.
+Did anyone else hear that?
+I'm just here for the vibes.
+This is fine.
+
+[dm]
+Mwahaha!
+Choose wisely.
+Every door is perfectly safe.
+I worked really hard on this.
+Go on. Take the big pile.
+Don't mind the scorch marks.
+The traps are just decoration.
+I'd sprint, if I were you.
+Somebody's not coming back.
+Interesting choice.
+Refunds are not available.
+This one is my favourite.
+
+[ghost]
+I see everything.
+Ooooooooo.
+Trust the dead.
+That door looks fine to me. Hehe.
+I'm not mad. I'm haunting.
+Your gold looks heavy. Let me help.
+I died for THIS?
+Boo. Also, sprint.
+Join us.
+Being dead is surprisingly comfy.
+
+[merchant]
+Potions! Barely expired!
+No refunds. No questions.
+Armour, only slightly dented.
+That Lens belonged to a guy. He's fine.
+Locks! Lock your friends out!
+Shoves, half price. Friendship not included.
+Charms! Most of them work!
+Buy something or stop staring.
+Everything must go. Like adventurers.
+Gold spent here goes to the DM. Totally unrelated.
+
+[huddle]
+Let's both sneak into Door {door}.
+You go first into Door {door}. I'll be right behind you.
+I'm taking Door {door}. Stay away.
+Door {door} is a trap. Trust me.
+Want to team up? Just this once.
+I'm lying to everyone except you.
+I'm going to shove you. Kidding. Maybe.
+Let's gang up on the leader.
+Follow my lead.
+I bought a Lens. Want to know what I saw?
+Act natural.
+I don't trust the ghosts.
