@@ -128,6 +128,7 @@ const Scene = (() => {
       <button class="sd-leaf" type="button" data-i="${i}" disabled>
         <span class="sd-num">${ROMAN[i]}</span>
         <span class="sd-clue"></span>
+        <span class="sd-warn"></span>
         <span class="sd-band b1"></span><span class="sd-band b2"></span>
         <span class="sd-ring"></span>
       </button>
@@ -139,6 +140,7 @@ const Scene = (() => {
       i, g, el,
       leaf: el.querySelector('.sd-leaf'),
       clue: el.querySelector('.sd-clue'),
+      warn: el.querySelector('.sd-warn'),
       fx: el.querySelector('.sd-fx'),
       gold: el.querySelector('.sd-gold'),
       seen: el.querySelector('.sd-seen'),
@@ -152,6 +154,8 @@ const Scene = (() => {
     const sig = JSON.stringify(face);
     if (sig === door.faceSig) return;
     door.faceSig = sig;
+    door.warn.textContent = face && face.warn ? (face.warn === 'weak' ? 'Weak' : 'Resist') : '';
+    door.warn.className = 'sd-warn ' + (face && face.warn ? face.warn : '');
     if (!face || face.unknown) {
       door.gold.textContent = '?';
       door.clue.textContent = '';
@@ -166,7 +170,7 @@ const Scene = (() => {
     door.clue.className = `sd-clue el-${face.clue}`;
     door.fx.className = `sd-fx fx-${face.clue}`;
     door.fx.innerHTML = face.clue === 'none' ? '' : '<i></i><i></i><i></i>';
-    door.leaf.setAttribute('aria-label', `Door ${ROMAN[door.i]}: ${face.gold} gold, ${SHORT_CLUE[face.clue].toLowerCase()}`);
+    door.leaf.setAttribute('aria-label', `Door ${ROMAN[door.i]}: ${face.gold} gold, ${SHORT_CLUE[face.clue].toLowerCase()}${face.warn === 'weak' ? ', you are weak to this element' : face.warn === 'resist' ? ', you resist this element' : ''}`);
   }
 
   function setSeen(door, seen) {
@@ -598,6 +602,11 @@ const Scene = (() => {
         if (role === 'dm' && d.dm.doors) seen = { trap: d.dm.doors[i].trap, illusion: d.dm.doors[i].illusion !== null };
         if (role === 'ghost' && d.sight) seen = { trap: d.sight[i].trap, illusion: d.sight[i].illusion !== null };
         if (role === 'adv') {
+          const aff = d.mine.affinity;
+          if (aff && face.clue !== 'none') {
+            if (face.clue === aff) face.warn = 'resist';
+            else if (S.config.WEAK_TO[aff] === face.clue) face.warn = 'weak';
+          }
           clickable = true;
           selected = ui.adv && ui.adv.door === i;
           const l = d.mine.lens.find((x) => x.door === i);
@@ -614,7 +623,8 @@ const Scene = (() => {
       if (!ac) return;
       if (a.alive && ac.element !== a.affinity) { ac.element = a.affinity; drawSprite(ac); }
       setHp(ac, a.hp, a.alive);
-      const showReady = (phase === 'setup' || phase === 'adv') && a.ready;
+      // your own sprite skips the bubble: the panel already says you're locked in
+      const showReady = (phase === 'setup' || phase === 'adv') && a.ready && a.id !== S.me;
       ac.bubble.hidden = !showReady;
     });
 

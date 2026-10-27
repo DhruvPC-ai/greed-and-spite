@@ -22,13 +22,15 @@ const C = {
   REST_HEAL: 10,
 
   // phase lengths in seconds at normal pace; the host picks a pace in the lobby
-  TIME: { setup: 60, dm: 60, adv: 45, results: 30 },
+  TIME: { setup: 60, dm: 75, adv: 45, results: 30 },
   PACE: { relaxed: 1.5, normal: 1, fast: 0.7 },
   DEFAULT_PACE: 'normal',
 
   // per-round DM gold budget and mana income
   goldBudget: (doors, round) => doors * (10 + 10 * round),
   manaIncome: (doors, round) => doors * (3 + 2 * round),
+  // the DM starts each dungeon with this much mana banked, so round 1 has real choices
+  DM_START_MANA: 8,
   MIN_DOOR_GOLD: 10,
 
   TRAPS: {
@@ -79,7 +81,7 @@ const PUBLIC_CONFIG = {
   APPROACH: C.APPROACH, ROOM_BAGS: C.ROOM_BAGS, LOCK_MULT: C.LOCK_MULT, SHOVE_MULT: C.SHOVE_MULT,
   RESIST: C.RESIST, WEAK: C.WEAK, CHARM: C.CHARM, ARMOUR: C.ARMOUR,
   HAUNT_STEAL: C.HAUNT_STEAL, DEATH_DROP: C.DEATH_DROP, SHOP: C.SHOP,
-  TIME: C.TIME, PACE: C.PACE,
+  TIME: C.TIME, PACE: C.PACE, DM_START_MANA: C.DM_START_MANA,
   ELEMENTS, WEAK_TO,
 };
 
@@ -201,7 +203,7 @@ function startDungeon(room) {
     };
   }
   m.dungeon = {
-    dmId, advIds, doorsCount, rounds, round: 0, P, mana: 0, budget: 0, adv,
+    dmId, advIds, doorsCount, rounds, round: 0, P, mana: C.DM_START_MANA, budget: 0, adv,
     doors: null, draft: null, actions: {}, haunts: {}, ghostDone: {}, lens: {},
     lastResult: null, scores: null, history: [], awards: null,
   };
@@ -700,7 +702,7 @@ function viewFor(room, p) {
     now: Date.now(),
     settings: room.settings,
     config: PUBLIC_CONFIG,
-    players: room.players.map((x) => ({ id: x.id, name: x.name, connected: x.connected })),
+    players: room.players.map((x) => ({ id: x.id, name: x.name, connected: x.connected, guide: !!x.guide })),
     match: null,
     hasLastLog: !!room.lastLog,
   };
@@ -727,7 +729,12 @@ function viewFor(room, p) {
     scores: d.scores,
     awards: d.awards,
   };
-  if (role === 'dm') dv.dm = { mana: d.mana, draft: d.draft, doors: d.doors, timedOut: d.dmTimedOut };
+  if (role === 'dm') {
+    dv.dm = {
+      mana: d.mana, draft: d.draft, doors: d.doors, timedOut: d.dmTimedOut,
+      nextIncome: d.round < d.rounds ? C.manaIncome(d.doorsCount, d.round + 1) : 0,
+    };
+  }
   if (role === 'ghost' && room.phase === 'adv' && d.doors) {
     dv.sight = d.doors.map((x) => ({ trap: x.trap, illusion: x.illusion }));
   }
@@ -768,11 +775,11 @@ function attach(socket, room, player) {
 io.on('connection', (socket) => {
   const reply = (cb, payload) => { if (typeof cb === 'function') cb(payload); };
 
-  socket.on('create', ({ name, token } = {}, cb) => {
+  socket.on('create', ({ name, token, guide } = {}, cb) => {
     name = cleanName(name);
     if (!name) return reply(cb, { error: 'Enter a name.' });
     const code = newCode();
-    const player = { id: crypto.randomUUID(), name, token: String(token || ''), connected: true };
+    const player = { id: crypto.randomUUID(), name, token: String(token || ''), connected: true, guide: !!guide };
     const room = { code, players: [player], hostId: player.id, phase: 'lobby', settings: { rounds: C.DEFAULT_ROUNDS, pace: C.DEFAULT_PACE }, match: null, timer: null, deadline: null, emptySince: null };
     rooms.set(code, room);
     attach(socket, room, player);
@@ -780,7 +787,7 @@ io.on('connection', (socket) => {
     broadcast(room);
   });
 
-  socket.on('join', ({ code, name, token } = {}, cb) => {
+  socket.on('join', ({ code, name, token, guide } = {}, cb) => {
     code = String(code || '').trim().toUpperCase();
     name = cleanName(name);
     const room = rooms.get(code);
@@ -801,6 +808,7 @@ io.on('connection', (socket) => {
       player = { id: crypto.randomUUID(), name, token: String(token || ''), connected: true };
       room.players.push(player);
     }
+    if (guide) player.guide = true;
     attach(socket, room, player);
     room.emptySince = null;
     reply(cb, { ok: true, code });
@@ -868,7 +876,7 @@ io.on('connection', (socket) => {
 
   socket.on('buy', ({ item } = {}, cb) => {
     const { room, player, d } = ctx(socket);
-    if (!d || !['setup', 'adv'].includes(room.phase)) return;
+    if (!d || !['setup', 'dm', 'adv'].includes(room.phase)) return;
     const st = d.adv[player.id];
     const it = C.SHOP[item];
     if (!st || !st.alive || !it) return;
@@ -883,7 +891,7 @@ io.on('connection', (socket) => {
 
   socket.on('drink', (_, cb) => {
     const { room, player, d } = ctx(socket);
-    if (!d || !['setup', 'adv'].includes(room.phase)) return;
+    if (!d || !['setup', 'dm', 'adv'].includes(room.phase)) return;
     const st = d.adv[player.id];
     if (!st || !st.alive || st.potions < 1) return;
     if (st.hp >= C.START_HP) return reply(cb, { error: 'You are already at full HP.' });
@@ -980,6 +988,13 @@ io.on('connection', (socket) => {
         broadcast(room);
       }
     }
+  });
+
+  socket.on('guideDone', () => {
+    const { room, player } = ctx(socket);
+    if (!room || !player) return;
+    player.guide = true;
+    broadcast(room);
   });
 
   socket.on('getLog', (_, cb) => {

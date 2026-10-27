@@ -14,6 +14,7 @@ if (!token) { token = Math.random().toString(36).slice(2) + Date.now().toString(
 
 let S = null;
 let clockOffset = 0;
+const guideRead = () => store.get('gs_guide') === '1';
 let screen = null;
 const ui = { name: store.get('gs_name') || '', code: '', dmKey: null, dm: null, advKey: null, adv: null, rules: false };
 
@@ -53,7 +54,7 @@ const ack = (r) => { if (r && r.error) toast(r.error); };
 socket.on('connect', () => {
   const code = store.get('gs_code');
   if (code && ui.name) {
-    socket.emit('join', { code, name: ui.name, token }, (r) => {
+    socket.emit('join', { code, name: ui.name, token, guide: guideRead() }, (r) => {
       if (r && r.error) { store.del('gs_code'); S = null; render(); }
     });
   }
@@ -64,6 +65,7 @@ socket.on('state', (v) => {
   clockOffset = v.now - Date.now();
   store.set('gs_code', v.code);
   syncLocal();
+  if (S.phase === 'lobby' && !store.get('gs_tut_seen') && !Tutorial.isOpen()) openTutorial(0);
   const need = needsMe() ? `${S.phase}:${S.match.dIndex}:${D().round}` : null;
   if (need && need !== lastNeed) Sound.play('yourTurn');
   lastNeed = need;
@@ -89,6 +91,24 @@ function stillOwes() {
 }
 socket.on('kicked', () => { store.del('gs_code'); S = null; render(); toast('The host removed you from the game.'); });
 socket.on('disconnect', () => toast('Connection lost. Reconnecting…'));
+
+function openTutorial(start) {
+  store.set('gs_tut_seen', '1');
+  Tutorial.show(start, () => {
+    store.set('gs_guide', '1');
+    if (S) socket.emit('guideDone');
+  });
+}
+// which slide helps most with what's on screen right now
+function helpSlide() {
+  const d = D();
+  if (!d) return 'welcome';
+  if (S.phase === 'setup') return d.role === 'dm' ? 'dm' : 'elements';
+  if (S.phase === 'dm') return d.role === 'dm' ? 'dm' : 'shop';
+  if (S.phase === 'adv') return d.role === 'dm' ? 'dm' : d.role === 'ghost' ? 'ghosts' : 'doors';
+  if (S.phase === 'results') return 'first';
+  return 'welcome';
+}
 
 /* ---------- local drafts follow the server's round ---------- */
 function syncLocal() {
@@ -165,7 +185,7 @@ function render() {
     document.getElementById('side').innerHTML = renderSide();
     Scene.update(S, ui);
   }
-  $modal.innerHTML = ui.rules ? renderRules() : '';
+  $modal.innerHTML = ui.rules ? renderRules() : Tutorial.isOpen() ? Tutorial.html() : '';
 }
 function renderPanel() {
   const el = document.getElementById('panel');
@@ -201,7 +221,7 @@ function renderHome() {
         <button class="pbtn" data-act="join">Join</button>
       </div>
     </div>
-    <button class="pbtn quiet sm" data-act="rules">How to play</button>
+    <button class="pbtn sm" data-act="tut">How to play (1 minute)</button>
   </main>`;
 }
 
@@ -217,6 +237,7 @@ function renderLobby() {
         ${p.id === S.me ? '<span class="tag">You</span>' : ''}
         ${!p.connected ? '<span class="tag">Away</span>' : ''}
       </span>
+      <span class="tag ${p.guide ? 'ready' : ''}">${p.guide ? 'Read the guide' : 'Hasn’t read the guide'}</span>
       ${isHost() && p.id !== S.me ? `<button class="pbtn quiet sm" data-act="kick" data-id="${p.id}">Remove</button>` : ''}
     </div>`).join('');
   const enough = S.players.length >= c.MIN_PLAYERS;
@@ -248,7 +269,8 @@ function renderLobby() {
     </div>
     ${S.hasLastLog ? `<div class="win"><div class="win-title">Last match</div>${logButtons()}</div>` : ''}
     <div class="row">
-      <button class="pbtn quiet sm" data-act="rules">How to play</button>
+      <button class="pbtn sm ${guideRead() ? 'quiet' : 'gold'}" data-act="tut">How to play (1 minute)</button>
+      <button class="pbtn quiet sm" data-act="rules">Full rules</button>
       <button class="pbtn quiet sm" data-act="leave">Leave game</button>
       ${soundBtn()}
     </div>
@@ -271,16 +293,17 @@ function renderBar() {
     <span class="spacer"></span>
     <span class="timer" id="timer" hidden>${Sprites.icon('hourglass', 2)}<span id="timer-val"></span></span>
     ${soundBtn()}
-    <button class="pbtn sm quiet" data-act="rules">Rules</button>`;
+    <button class="pbtn sm quiet" data-act="tut">How to play</button>`;
 }
 
 function renderTitle() {
   const d = D();
-  const t = (h, p) => `<h2>${h}</h2>${p ? `<p>${p}</p>` : ''}`;
+  const help = S.phase === 'matchEnd' || S.phase === 'dungeonEnd' ? '' : `<button class="pbtn sm quiet help-btn" data-act="tutHelp">Help</button>`;
+  const t = (h, p) => `<h2>${h}</h2>${p ? `<p>${p}</p>` : ''}${help}`;
   if (S.phase === 'matchEnd') return t('The hoard is counted', '');
   if (S.phase === 'dungeonEnd') return t(`${esc(pname(d.dmId))}’s dungeon is done`, '');
   if (S.phase === 'setup') return t(d.role === 'dm' ? 'You are the dungeon master' : 'Gear up', d.role === 'dm' ? 'The adventurers are getting ready.' : 'Pick your element and visit the shop.');
-  if (S.phase === 'dm') return t(d.role === 'dm' ? 'Set your traps' : `${esc(pname(d.dmId))} is setting traps`, d.role === 'dm' ? 'The doors above preview what adventurers will see.' : 'Talk it over. Lie if it helps.');
+  if (S.phase === 'dm') return t(d.role === 'dm' ? 'Set your traps' : `${esc(pname(d.dmId))} is setting traps`, d.role === 'dm' ? 'The doors above preview what adventurers will see.' : 'Shop while you wait. Talk it over, and lie if it helps.');
   if (S.phase === 'adv') {
     if (d.role === 'dm') return t('The adventurers are choosing', '');
     if (d.role === 'ghost') return t('You are a ghost', 'You see every real trap.');
@@ -325,6 +348,10 @@ function renderSide() {
       <div class="win-title">The party</div>
       <p class="small" style="margin-bottom:6px"><span class="tag host">DM</span> ${esc(pname(d.dmId))}</p>
       <ul class="party">${rows}</ul>
+      <div class="wheel-mini" title="Each element beats the next one">
+        ${['water', 'fire', 'air', 'earth', 'water'].map((e) => `<span class="el-${e}">${Sprites.icon(e, 2)} ${cap(e)}</span>`).join('<span class="sep">›</span>')}
+      </div>
+      <p class="muted small" style="margin:4px 0 0">Each element beats the next.</p>
     </div>
     ${totals}`;
 }
@@ -336,11 +363,26 @@ function panelHtml() {
   if (S.phase === 'matchEnd') return renderMatchEnd();
   if (S.phase === 'dungeonEnd') return renderDungeonEnd();
   if (S.phase === 'setup') return renderSetup();
-  if (S.phase === 'dm') return d.role === 'dm' ? renderDmEditor() : `<div class="win"><p style="margin:0">${d.role === 'ghost' ? 'Once the doors are set, you’ll see every trap.' : 'Watch the doors. When they’re ready, choose fast.'}</p></div>`;
+  if (S.phase === 'dm') {
+    if (d.role === 'dm') return renderDmEditor();
+    if (d.role === 'ghost') return '<div class="win"><p style="margin:0">Once the doors are set, you’ll see every trap.</p></div>';
+    return `<div class="win"><p style="margin:0">The doors open for choosing as soon as the DM is done. You can shop now so you’re ready.</p></div>${renderShop()}`;
+  }
   if (S.phase === 'adv') return d.role === 'dm' ? renderDmWatch() : d.role === 'ghost' ? renderGhost() : renderAdventurer();
   if (S.phase === 'results') return renderResults();
   return '';
 }
+
+function steps(list) {
+  const firstOpen = list.findIndex((x) => !x.done);
+  return `<div class="steps">${list.map((x, k) => `<span class="step ${x.done ? 'done' : k === firstOpen ? 'now' : ''}"><b>${k + 1}</b>${x.text}</span>`).join('')}</div>`;
+}
+const elementWarning = (clue, aff) => {
+  if (!aff || clue === 'none') return '';
+  if (clue === aff) return `<span class="sd-warn resist" style="position:static;transform:none">Resist</span> You resist ${cap(clue)}: half damage.`;
+  if (cfg().WEAK_TO[aff] === clue) return `<span class="sd-warn weak" style="position:static;transform:none">Weak</span> ${cap(clue)} beats ${cap(aff)}: ×1.5 damage to you.`;
+  return '';
+};
 
 /* ----- setup ----- */
 function renderSetup() {
@@ -397,12 +439,18 @@ function renderDmEditor() {
   const left = d.budget - placed;
   const cost = dmCost();
   const mana = d.dm.mana;
+  const living = d.advs.filter((a) => a.alive);
+  const elNote = (e) => {
+    const weak = living.filter((a) => c.WEAK_TO[a.affinity] === e).map((a) => esc(pname(a.id)));
+    const res = living.filter((a) => a.affinity === e).map((a) => esc(pname(a.id)));
+    return (weak.length ? `<span class="dm-el-note w">Hurts ${weak.join(', ')} more</span>` : '') + (res.length ? `<span class="dm-el-note r">${res.join(', ')} resist${res.length > 1 ? '' : 's'}</span>` : '');
+  };
   const cards = ui.dm.map((x, i) => {
     const tiers = ['none', 'minor', 'major', 'deadly'].map((t) => `
       <button class="pbtn sm ${x.tier === t ? 'on' : ''}" data-act="dmTier" data-i="${i}" data-v="${t}">
         ${t === 'none' ? 'No trap' : `${c.TRAPS[t].name}<span class="sub">${c.TRAPS[t].dmg} dmg, ${c.TRAPS[t].cost} mana</span>`}
       </button>`).join('');
-    const els = EL.map((e) => `<button class="pbtn sm ${x.element === e ? 'on' : ''}" data-act="dmEl" data-i="${i}" data-v="${e}">${Sprites.icon(e, 2)} <span class="el-${e}">${cap(e)}</span></button>`).join('');
+    const els = EL.map((e) => `<button class="pbtn sm ${x.element === e ? 'on' : ''}" data-act="dmEl" data-i="${i}" data-v="${e}">${Sprites.icon(e, 2)} <span class="el-${e}">${cap(e)}</span>${elNote(e)}</button>`).join('');
     const ill = [['honest', 'Honest clue'], ['none', 'Fake: nothing'], ...EL.map((e) => [e, `Fake: ${cap(e)}`])]
       .map(([v, l]) => `<option value="${v}" ${x.illusion === v ? 'selected' : ''}>${l}${v !== 'honest' ? ` (${c.ILLUSION_COST} mana)` : ''}</option>`).join('');
     return `<div class="dm-door">
@@ -419,11 +467,18 @@ function renderDmEditor() {
     </div>`;
   }).join('');
   const ok = left === 0 && cost <= mana && ui.dm.every((x) => x.gold >= c.MIN_DOOR_GOLD);
+  const anyTrap = ui.dm.some((x) => x.tier !== 'none' || x.illusion !== 'honest');
   return `<div class="win">
+      ${steps([
+        { text: left === 0 ? 'Gold hidden' : `Hide the gold (${left > 0 ? left + ' left' : -left + ' too much'})`, done: left === 0 },
+        { text: 'Add traps or fake clues (optional)', done: anyTrap },
+        { text: 'Lock in', done: false },
+      ])}
       <div class="totals">
         <span>Gold to place <b class="${left === 0 ? 'gold' : ''}" style="${left < 0 ? 'color:var(--blood)' : ''}">${left}</b></span>
         <span>${Sprites.icon('mana', 2)} Mana <b style="${cost > mana ? 'color:var(--blood)' : ''}">${cost}</b> of ${mana}</span>
       </div>
+      <p class="mana-note">Mana is your trap budget. Traps and fake clues cost mana. ${d.dm.nextIncome ? `You get ${d.dm.nextIncome} more next round, and` : 'This is the last round, and'} anything you don’t spend ${d.dm.nextIncome ? 'carries over' : 'is wasted'}.</p>
       <p class="muted small">Hide all ${d.budget} gold, at least ${c.MIN_DOOR_GOLD} per door. Adventurers see the gold and the clue, never the trap. Gold nobody takes stays yours.</p>
       <div class="grid2">${cards}</div>
       <div class="row" style="margin-top:16px">
@@ -482,8 +537,15 @@ function renderAdventurer() {
       locked = `Locked in: ${VERB[act.approach]} through door ${ROMAN[act.door]}${ex.length ? ' with ' + ex.join(', ') : ''}.`;
     }
   }
+  const warnLine = sel ? elementWarning(sel.clue, mine.affinity) : '';
   return `<div class="win">
+      ${steps([
+        { text: sel ? `Door ${ROMAN[a.door]}` : 'Tap a door above', done: !!sel },
+        { text: `${VERB[a.approach]}${sel ? '' : ' (pick how)'}`, done: !!sel && !!act },
+        { text: act ? 'Locked in' : 'Lock in', done: !!act },
+      ])}
       <div class="win-title">${sel ? `Door ${ROMAN[a.door]} <span class="muted"><span class="gold">${sel.gold} gold</span>. <span class="el-${sel.clue}">${CLUE[sel.clue]}</span></span>` : 'Tap a door above'}</div>
+      ${warnLine ? `<p class="small" style="margin:-4px 0 12px">${warnLine}</p>` : ''}
       <div class="seg">${approaches}</div>
       ${items.length ? `<div class="win-title" style="margin-top:14px">Items</div><div class="seg">${items.join('')}</div>` : ''}
       ${act ? `<div class="note">${esc(locked)} You can change it until time runs out.</div>` : ''}
@@ -491,7 +553,7 @@ function renderAdventurer() {
         <button class="pbtn gold" data-act="lockIn" ${sel ? '' : 'disabled'}>${sel ? `${VERB[a.approach]} through door ${ROMAN[a.door]}` : 'Pick a door first'}</button>
         <button class="pbtn" data-act="rest">Rest by the fire<span class="sub">+${c.REST_HEAL} HP, no gold</span></button>
       </div>
-      <p class="muted small" style="margin:12px 0 0">Only the first ones in spring the trap. A room needs ${c.ROOM_BAGS} bags to empty; with more, the gold is split by bags.</p>
+      <p class="muted small" style="margin:12px 0 0">Only the first ones in spring the trap. A room needs ${c.ROOM_BAGS} bags to empty; with more, the gold is split by bags. If time runs out before you lock in, you rest by the fire.</p>
     </div>
     ${lens}
     ${renderShop()}`;
@@ -598,7 +660,7 @@ function renderRules() {
     <p style="margin-top:10px">One player is the dungeon master. Everyone else is a greedy adventurer, out for themselves. Everyone takes one turn as DM. Highest total score wins.</p>
     <h3>Each round</h3>
     <ul>
-      <li>The DM hides gold behind the doors and buys traps with mana. Every trap has an element.</li>
+      <li>The DM hides gold behind the doors and buys traps with mana, their trap budget. The DM starts each dungeon with 8 mana banked, gets more every round, and keeps what they don’t spend. Every trap has an element.</li>
       <li>Adventurers see each door’s gold and a clue. A trapped door shows its real element; an empty door shows nothing. The DM can pay for an illusion to fake either.</li>
       <li>Each adventurer secretly picks a door and how to go in, or rests by the fire (+10 HP). Then the doors open.</li>
     </ul>
@@ -609,8 +671,8 @@ function renderRules() {
       <li>A room needs 3 bags to empty. With more than 3 bags, gold splits by bags. With fewer, the rest stays with the DM.</li>
     </ul>
     <h3>Elements</h3>
-    <p>Your element halves damage from that element and adds 50% from the one that beats it. Water beats Fire, Fire beats Air, Air beats Earth, Earth beats Water.</p>
-    <h3>Items (single use, shop always open)</h3>
+    <p>Your element halves damage from that element and adds 50% from the one that beats it. Water beats Fire, Fire beats Air, Air beats Earth, Earth beats Water. Doors show a Weak or Resist badge for you, so you don’t need to remember this.</p>
+    <h3>Items (single use; the shop is open while the DM sets traps and while you choose)</h3>
     <ul>
       <li>Potion: +40 HP. Armour: half damage this round. Charm: resist one element this round.</li>
       <li>Lens: see the real trap behind one door, only you.</li>
@@ -730,12 +792,17 @@ document.addEventListener('input', (e) => {
 });
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && ui.rules) { ui.rules = false; render(); }
+  if (Tutorial.isOpen()) {
+    if (e.key === 'Escape') { Tutorial.handle('tutClose'); render(); }
+    if (e.key === 'ArrowRight') { Tutorial.handle('tutNext'); render(); }
+    if (e.key === 'ArrowLeft') { Tutorial.handle('tutPrev'); render(); }
+  }
   if (e.key === 'Enter' && e.target.dataset.input === 'code') doJoin();
 });
 function doJoin() {
   if (!ui.name.trim()) return toast('Enter your name first.');
   store.set('gs_name', ui.name.trim());
-  socket.emit('join', { code: ui.code, name: ui.name.trim(), token }, ack);
+  socket.emit('join', { code: ui.code, name: ui.name.trim(), token, guide: guideRead() }, ack);
 }
 document.addEventListener('change', (e) => {
   const k = e.target.dataset.change;
@@ -750,7 +817,7 @@ document.addEventListener('change', (e) => {
 document.addEventListener('click', (e) => {
   const t = e.target.closest('[data-act]');
   if (!t) return;
-  if (t.dataset.act === 'closeRules' && e.target.closest('[data-stop]') && !e.target.closest('button')) return;
+  if ((t.dataset.act === 'closeRules' || t.dataset.act === 'tutClose') && e.target.closest('[data-stop]') && !e.target.closest('button')) return;
   const act = t.dataset.act;
   const i = t.dataset.i !== undefined ? Number(t.dataset.i) : null;
   const v = t.dataset.v;
@@ -758,13 +825,17 @@ document.addEventListener('click', (e) => {
     case 'create':
       if (!ui.name.trim()) return toast('Enter your name first.');
       store.set('gs_name', ui.name.trim());
-      socket.emit('create', { name: ui.name.trim(), token }, ack);
+      socket.emit('create', { name: ui.name.trim(), token, guide: guideRead() }, ack);
       break;
     case 'join': doJoin(); break;
     case 'leave': socket.emit('leave'); store.del('gs_code'); S = null; render(); break;
     case 'kick': socket.emit('kick', { pid: t.dataset.id }); break;
     case 'start': socket.emit('start', null, ack); break;
-    case 'rules': ui.rules = true; render(); break;
+    case 'rules': ui.rules = true; Tutorial.close(false); render(); break;
+    case 'tut': openTutorial(0); render(); break;
+    case 'tutHelp': openTutorial(helpSlide()); render(); break;
+    case 'tutNext': case 'tutPrev': case 'tutGo': case 'tutClose': case 'tutDone':
+      Tutorial.handle(act, i); render(); break;
     case 'closeRules': ui.rules = false; render(); break;
     case 'aff': socket.emit('affinity', { element: t.dataset.el }); break;
     case 'setupReady': socket.emit('setupReady'); Sound.play('lockIn'); break;

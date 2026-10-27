@@ -122,6 +122,13 @@ const Sprites = (() => {
     mana: [['...MM...', '..MMMM..', '.MMWMMM.', 'MMWMMMMM', 'MMMMMMMM', '.MMMMMM.', '..MMMM..', '...MM...'], { M: '#8f7bff', W: '#e3dcff' }],
     hourglass: [['KKKKKKKK', '.KYYYYK.', '..KYYK..', '...KK...', '...KK...', '..K..K..', '.KYYYYK.', 'KKKKKKKK'], { K: '#c9a35a', Y: '#f5c542' }],
     none: [['........', '..WWWW..', '.W....W.', '.....W..', '....W...', '........', '....W...', '........'], { W: '#a9a48f' }],
+    shield: [['KKKKKKKK', 'KSSSSSSK', 'KSWSSSSK', 'KSWSSSSK', 'KSSSSSSK', '.KSSSSK.', '..KSSK..', '...KK...'], { S: '#9aa3b5', W: '#e3e8f2', K: '#3a3f55' }],
+    eye: [['........', '..KKKK..', '.KWWWWK.', 'KWWBBWWK', 'KWWBBWWK', '.KWWWWK.', '..KKKK..', '........'], { K: '#c9a35a', W: '#e8f4ff', B: '#1d1620' }],
+    push: [['........', '....A...', '....AA..', 'AAAAAAA.', 'AAAAAAAA', 'AAAAAAA.', '....AA..', '....A...'], { A: '#ff8fb1' }],
+    amulet: [['..K..K..', '...KK...', '...KK...', '..PPPP..', '.PPWPPP.', '.PPPPPP.', '..PPPP..', '...PP...'], { K: '#c9a35a', P: '#8f7bff', W: '#e3dcff' }],
+    potion: [['...KK...', '...WW...', '...WW...', '..WRRW..', '.WRRRRW.', '.WRWRRW.', '.WRRRRW.', '..WWWW..'], { K: '#6b4423', W: '#cfd8e6', R: '#e0524a' }],
+    bag: [['...KK...', '..K..K..', '...KK...', '..GGGG..', '.GGYYGG.', 'GGYGGYGG', 'GGGGGGGG', '.GGGGGG.'], { K: '#5a3d1e', G: '#9b7440', Y: '#f5c542' }],
+    pointer: [['..WWWW..', '..WWWW..', '..WWWW..', 'WWWWWWWW', '.WWWWWW.', '..WWWW..', '...WW...', '........'], { W: '#f2c14e' }],
     zz: [['ZZZZ....', '..Z.....', '.Z......', 'ZZZZ.ZZZ', '......Z.', '.....ZZZ', '........', '........'], { Z: '#c3b6ff' }],
   };
   function icon(name, scale = 3) {
