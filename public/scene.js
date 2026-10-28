@@ -28,7 +28,8 @@ const Scene = (() => {
   const defaultSpot = (k, m) => ({ x: m <= 1 ? 0.6 : 0.22 + (0.73 * k) / (m - 1), y: 1 });
   const GHOST_LIFT = 28;
 
-  const reduced = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // the game's own Animations setting wins; otherwise follow the device
+  const reduced = () => (window.GSAnimOff ? window.GSAnimOff() : window.matchMedia('(prefers-reduced-motion: reduce)').matches);
   const sfx = (on, name, ...args) => { if (on && window.Sound) Sound.play(name, ...args); };
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : '');

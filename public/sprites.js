@@ -56,6 +56,46 @@ const Sprites = (() => {
     };
   }
 
+  // top-down views for the room: back and side (the side view faces right; left is mirrored)
+  const BACK_TOP = [
+    '....HHHH....',
+    '...HHHHHH...',
+    '..HHHHHHHH..',
+    '..HHHHHHHH..',
+    '..HHHHHHHH..',
+    '..HHHHHHHH..',
+    '...HHHHHH...',
+    '..CCCCCCCC..',
+    '.CCCCCCCCCC.',
+    '.SCCCCCCCCS.',
+    '.SCCCCCCCCS.',
+    '..BBBBBBBB..',
+    '..CCCCCCCC..',
+  ];
+  const SIDE_TOP = [
+    '....HHHH....',
+    '...HHHHHH...',
+    '..HHHHHHHH..',
+    '..HHHHHSSH..',
+    '..HHHHSSKS..',
+    '..HHHHSSSS..',
+    '...HHHHSS...',
+    '...CCCCCC...',
+    '...CCCCECC..',
+    '...CCSSCCC..',
+    '...CCSSCCC..',
+    '...BBBBBB...',
+    '...CCCCCC...',
+  ];
+  const SIDE_LEGS_A = ['...LL..LL...', '..LL....LL..', '.KKK....KKK.'];
+  const SIDE_LEGS_B = ['....LLLL....', '....LLLL....', '....KKKK....'];
+  function walker(colorIdx, element, dir, scale = 3) {
+    const pal = advPalette(colorIdx, element);
+    if (dir === 'up') return pix(BACK_TOP.concat(LEGS_A), pal, scale, 'f1') + pix(BACK_TOP.concat(LEGS_B), pal, scale, 'f2');
+    if (dir === 'left' || dir === 'right') return pix(SIDE_TOP.concat(SIDE_LEGS_A), pal, scale, 'f1') + pix(SIDE_TOP.concat(SIDE_LEGS_B), pal, scale, 'f2');
+    return pix(BODY_TOP.concat(LEGS_A), pal, scale, 'f1') + pix(BODY_TOP.concat(LEGS_B), pal, scale, 'f2');
+  }
+
   // two walk frames stacked; CSS swaps them
   function adventurer(colorIdx, element, scale = 4) {
     const pal = advPalette(colorIdx, element);
@@ -151,6 +191,7 @@ const Sprites = (() => {
     potion: [['...KK...', '...WW...', '...WW...', '..WRRW..', '.WRRRRW.', '.WRWRRW.', '.WRRRRW.', '..WWWW..'], { K: '#6b4423', W: '#cfd8e6', R: '#e0524a' }],
     bag: [['...KK...', '..K..K..', '...KK...', '..GGGG..', '.GGYYGG.', 'GGYGGYGG', 'GGGGGGGG', '.GGGGGG.'], { K: '#5a3d1e', G: '#9b7440', Y: '#f5c542' }],
     pointer: [['..WWWW..', '..WWWW..', '..WWWW..', 'WWWWWWWW', '.WWWWWW.', '..WWWW..', '...WW...', '........'], { W: '#f2c14e' }],
+    flask: [['...KK...', '...WW...', '..WOOW..', '.WOOOOW.', '.WOYYOW.', '.WOOOOW.', '..WWWW..', '........'], { W: '#cfd8e6', O: '#d98a2b', Y: '#f5c542', K: '#6b4423' }],
     erase: [['R......R', '.R....R.', '..R..R..', '...RR...', '...RR...', '..R..R..', '.R....R.', 'R......R'], { R: '#e0524a' }],
     zz: [['ZZZZ....', '..Z.....', '.Z......', 'ZZZZ.ZZZ', '......Z.', '.....ZZZ', '........', '........'], { Z: '#c3b6ff' }],
   };
@@ -159,8 +200,30 @@ const Sprites = (() => {
     return pix(map, pal, scale, 'icon');
   }
 
+  // the lantern held up in the scan close-up: a hand on the handle, glowing glass below
+  const LANTERN = [
+    '....SSS.....',
+    '...SSSSS....',
+    '...SKKKS....',
+    '...K...K....',
+    '....KKK.....',
+    '..BBBBBBB...',
+    '.BYYYYYYYB..',
+    '.BYOOOOOYB..',
+    '.BYOORROYB..',
+    '.BYORRROYB..',
+    '.BYOORROYB..',
+    '.BYOOOOOYB..',
+    '.BYYYYYYYB..',
+    '..BBBBBBB...',
+    '...BBBBB....',
+  ];
+  function lantern(scale = 6) {
+    return pix(LANTERN, { S: '#f0c8a0', K: '#9aa3b5', B: '#3a3f55', Y: '#ffe9a8', O: '#ffb347', R: '#ff7a2e' }, scale, 'lantern');
+  }
+
   const FLAME = [['..Y...', '.YY.Y.', '.YOY..', 'YOOOY.', 'YORROY', '.YRRY.'], { Y: '#ffd45e', O: '#ff9a2e', R: '#e8552b' }];
   function flame(scale = 4) { return pix(FLAME[0], FLAME[1], scale, ''); }
 
-  return { CLOAKS, ELEMENT, adventurer, sitting, portrait, ghost, dmHood, merchant, icon, flame };
+  return { CLOAKS, ELEMENT, adventurer, walker, sitting, portrait, ghost, dmHood, merchant, lantern, icon, flame };
 })();

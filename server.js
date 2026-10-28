@@ -32,6 +32,11 @@ const C = {
   manaIncome: (doors, round) => doors * (3 + 2 * round),
   // the DM starts each dungeon with this much mana banked, so round 1 has real choices
   DM_START_MANA: 8,
+
+  // scanning doors with the lantern
+  SCAN_MS: 3000,                                   // how long a scan takes
+  flasksPerRound: (doors) => Math.max(1, doors - 1),
+  flaskCap: (doors) => doors,                      // the most oil you can carry
   MIN_DOOR_GOLD: 10,
 
   TRAPS: {
@@ -60,9 +65,10 @@ const C = {
 
   SHOP: {
     potion: { name: 'Potion', cost: 10, text: 'Heal 40 HP. Drink any time during your turn.' },
+    oil: { name: 'Oil flask', cost: 6, text: 'Fuel for one more lantern scan. You can carry as many flasks as there are doors.' },
     armour: { name: 'Armour', cost: 12, text: 'Take half damage this round.' },
     charm: { name: 'Charm', cost: 6, text: 'Resist one element of your choice this round.' },
-    lens: { name: 'Lens', cost: 10, text: 'Privately see the real trap behind one door.' },
+    lens: { name: 'Lens', cost: 10, text: 'Fit it to your lantern: your next scan shows the real trap and its strength, even through a fake clue.' },
     lock: { name: 'Lock', cost: 10, text: 'Enter alone and take all the gold. Others on that door are locked out. You take 2.5× damage.' },
     shove: { name: 'Shove', cost: 8, text: 'If your target picks your door, they spring the trap alone at 1.5×.' },
   },
@@ -105,15 +111,18 @@ const MESSAGES = loadMessages(path.join(__dirname, 'messages.txt'));
 
 // the waiting room: positions are 0..1 across the hall floor, the same on every screen
 const ROOM = {
-  NEAR: 70, // how close two adventurers must stand to huddle, in an 800-wide hall
-  FLOOR_W: 752,
-  FLOOR_H: 41,
+  // the top-down room's floor, in the same units as public/room.js
+  FLOOR_W: 332,
+  FLOOR_H: 248,
+  NEAR: 44, // how close two players must stand to whisper; the client offers it at 36, leaving room for lag
   EMOTE_COOLDOWN_MS: 2500,
   WHISPER_COOLDOWN_MS: 2000,
-  MOVE_MIN_MS: 90,
+  MOVE_MIN_MS: 70,
 };
+const FACING = ['up', 'down', 'left', 'right'];
+// everyone starts along the bottom of the room, clear of the shop counter and the barrels
 function defaultSpot(k, m) {
-  return { x: m <= 1 ? 0.6 : 0.22 + (0.73 * k) / (m - 1), y: 1 };
+  return { x: m <= 1 ? 0.6 : 0.3 + (0.56 * k) / (m - 1), y: 0.94, d: 'up' };
 }
 function nearEnough(a, b) {
   if (!a || !b) return false;
@@ -131,7 +140,7 @@ const PUBLIC_CONFIG = {
   APPROACH: C.APPROACH, ROOM_BAGS: C.ROOM_BAGS, LOCK_MULT: C.LOCK_MULT, SHOVE_MULT: C.SHOVE_MULT,
   RESIST: C.RESIST, WEAK: C.WEAK, CHARM: C.CHARM, ARMOUR: C.ARMOUR,
   HAUNT_STEAL: C.HAUNT_STEAL, DEATH_DROP: C.DEATH_DROP, SHOP: C.SHOP,
-  TIME: C.TIME, PACE: C.PACE, DM_START_MANA: C.DM_START_MANA,
+  TIME: C.TIME, PACE: C.PACE, DM_START_MANA: C.DM_START_MANA, SCAN_MS: C.SCAN_MS,
   MESSAGES, NEAR: ROOM.NEAR, FLOOR_W: ROOM.FLOOR_W, FLOOR_H: ROOM.FLOOR_H,
   ELEMENTS, WEAK_TO,
 };
@@ -234,7 +243,7 @@ function startMatch(room) {
 function startDungeon(room) {
   const m = room.match;
   const dmId = m.dmOrder[m.dIndex];
-  const advIds = m.dmOrder.filter((id) => id !== dmId);
+  const advIds = m.dmOrder.filter((id) => id !== dmId && !room.players.find((p) => p.id === id && p.left));
   const doorsCount = Math.max(2, advIds.length - 1);
   const rounds = room.settings.rounds;
   let goldTotal = 0;
@@ -248,6 +257,7 @@ function startDungeon(room) {
       gold: C.START_GOLD,
       potions: C.START_POTIONS,
       inv: { armour: 0, charm: 0, lens: 0, lock: 0, shove: 0 },
+      flasks: 0,
       affinity: null,
       alive: true,
       setupReady: false,
@@ -256,7 +266,7 @@ function startDungeon(room) {
   m.dungeon = {
     dmId, advIds, doorsCount, rounds, round: 0, P, mana: C.DM_START_MANA, budget: 0, adv,
     doors: null, draft: null, actions: {}, haunts: {}, ghostDone: {}, lens: {},
-    lastResult: null, scores: null, history: [], awards: null, pos: {},
+    lastResult: null, scores: null, history: [], awards: null, pos: {}, known: {}, scans: {}, scanCount: {},
   };
   m.log.dungeons.push({
     dungeon: m.dIndex + 1,
@@ -279,6 +289,63 @@ function dlog(room) {
   const L = room.match.log.dungeons;
   return L[L.length - 1];
 }
+/* ---------- scanning doors with the lantern ---------- */
+const scanMs = () => Math.round(C.SCAN_MS * TIME_SCALE);
+// a door's position across the room floor, in the same 0..1 units as positions (see public/room.js)
+const doorNx = (i, n) => ((384 * (i + 1)) / (n + 1) - 26) / 332;
+function nearDoor(d, p, i) {
+  return !!p && p.y <= 0.14 && Math.abs(p.x - doorNx(i, d.doorsCount)) <= 0.11;
+}
+function stopScan(room, pid, refund, reason) {
+  const d = room.match && room.match.dungeon;
+  const scan = d && d.scans && d.scans[pid];
+  if (!scan) return;
+  clearTimeout(scan.timer);
+  delete d.scans[pid];
+  if (refund && d.adv[pid]) {
+    d.adv[pid].flasks += 1;
+    if (scan.lens) d.adv[pid].inv.lens += 1;
+  }
+  io.to(room.code).emit('scan', { id: pid, door: scan.door, on: false });
+  const p = room.players.find((x) => x.id === pid);
+  if (p && p.socketId) io.to(p.socketId).emit('scanResult', { door: scan.door, cancelled: true, reason: reason || 'cancelled' });
+}
+function stopAllScans(d, refund) {
+  if (!d || !d.scans) return;
+  for (const [pid, scan] of Object.entries(d.scans)) {
+    clearTimeout(scan.timer);
+    if (refund && d.adv[pid]) {
+      d.adv[pid].flasks += 1;
+      if (scan.lens) d.adv[pid].inv.lens += 1;
+    }
+  }
+  d.scans = {};
+}
+function finishScan(room, pid) {
+  const d = room.match && room.match.dungeon;
+  const scan = d && d.scans && d.scans[pid];
+  if (!scan || room.phase !== 'adv') return;
+  if (!nearDoor(d, d.pos[pid], scan.door)) return stopScan(room, pid, true, 'moved');
+  delete d.scans[pid];
+  const door = d.doors[scan.door];
+  const mine = (d.known[pid] = d.known[pid] || {});
+  const prev = mine[scan.door];
+  mine[scan.door] = {
+    clue: door.clue,
+    lens: scan.lens ? { trap: door.trap, illusion: door.illusion !== null } : prev ? prev.lens : null,
+  };
+  d.scanCount[pid] = (d.scanCount[pid] || 0) + 1;
+  shopLog(room, pid, {
+    scanned: ROMAN[scan.door],
+    saw: scan.lens ? `${trapText(door.trap) || 'no trap'}${door.illusion !== null ? ' (illusion broken)' : ''}` : `clue ${door.clue}`,
+    lens: scan.lens,
+  });
+  io.to(room.code).emit('scan', { id: pid, door: scan.door, on: false });
+  const p = room.players.find((x) => x.id === pid);
+  if (p && p.socketId) io.to(p.socketId).emit('scanResult', { door: scan.door, ...mine[scan.door] });
+  broadcast(room);
+}
+
 function shopLog(room, id, what) {
   const d = room.match.dungeon;
   dlog(room).shop.push({ round: d.round, phase: room.phase, player: nameOf(room, id), ...what });
@@ -290,7 +357,7 @@ function resetSpots(d) {
   d.pos = {};
   d.advIds.forEach((id, k) => (d.pos[id] = defaultSpot(k, d.advIds.length)));
 }
-const canRoam = (phase) => phase === 'setup' || phase === 'dm';
+const canRoam = (phase) => phase === 'setup' || phase === 'dm' || phase === 'adv';
 
 function endSetup(room) {
   const d = room.match.dungeon;
@@ -304,12 +371,21 @@ function startRound(room) {
   d.round += 1;
   d.budget = C.goldBudget(d.doorsCount, d.round);
   d.mana += C.manaIncome(d.doorsCount, d.round);
+  // fresh oil every round, up to what a lantern can carry
+  for (const id of livingIds(d)) {
+    const st = d.adv[id];
+    st.flasks = Math.min(C.flaskCap(d.doorsCount), (st.flasks || 0) + C.flasksPerRound(d.doorsCount));
+  }
+  stopAllScans(d, false);
+  d.known = {};
+  d.scans = {};
   d.doors = null;
   d.draft = null;
   d.actions = {};
+  d.drafts = {};
   d.haunts = {};
   d.ghostDone = {};
-  d.lens = {};
+
   d.lastResult = null;
   resetSpots(d);
   setPhase(room, 'dm', phaseTime(room, 'dm'), () => dmTimeout(room));
@@ -403,10 +479,10 @@ function dmTimeout(room) {
 }
 
 function livingIds(d) {
-  return d.advIds.filter((id) => d.adv[id].alive);
+  return d.advIds.filter((id) => d.adv[id].alive && !d.adv[id].left);
 }
 function ghostIds(d) {
-  return d.advIds.filter((id) => !d.adv[id].alive);
+  return d.advIds.filter((id) => !d.adv[id].alive && !d.adv[id].left);
 }
 
 function checkSetupDone(room) {
@@ -431,6 +507,27 @@ function checkAdvDone(room) {
   if (anyoneConnected && waitingLiving.length === 0 && waitingGhosts.length === 0) resolveRound(room);
 }
 
+function cleanAction(d, st, pid, a) {
+  if (!a || (a.type !== 'rest' && a.type !== 'door')) return { error: 'Pick a door or rest.' };
+  if (a.type === 'rest') return { action: { type: 'rest' } };
+  if (!Number.isInteger(a.door) || a.door < 0 || a.door >= d.doorsCount) return { error: 'Pick a door.' };
+  if (!C.APPROACH[a.approach]) return { error: 'Pick Sprint, Walk or Sneak.' };
+  const clean = { type: 'door', door: a.door, approach: a.approach, armour: false, charm: null, lock: false, shove: null };
+  if (a.armour) { if (st.inv.armour < 1) return { error: 'You have no Armour.' }; clean.armour = true; }
+  if (a.charm) {
+    if (st.inv.charm < 1) return { error: 'You have no Charm.' };
+    if (!ELEMENTS.includes(a.charm)) return { error: 'Pick an element for the Charm.' };
+    clean.charm = a.charm;
+  }
+  if (a.lock) { if (st.inv.lock < 1) return { error: 'You have no Lock.' }; clean.lock = true; }
+  if (a.shove) {
+    if (st.inv.shove < 1) return { error: 'You have no Shove.' };
+    if (a.shove === pid || !d.adv[a.shove] || !d.adv[a.shove].alive || d.adv[a.shove].left) return { error: 'Pick a living adventurer to shove.' };
+    clean.shove = a.shove;
+  }
+  return { action: clean };
+}
+
 function damageFor(st, act, trap, mult) {
   let m = mult;
   if (trap.element === st.affinity) m *= C.RESIST;
@@ -447,6 +544,7 @@ function trapLabel(trap) {
 function resolveRound(room) {
   if (room.phase !== 'adv') return;
   const d = room.match.dungeon;
+  for (const pid of Object.keys(d.scans || {})) stopScan(room, pid, true, 'time');
   const living = livingIds(d);
   const ghosts = ghostIds(d);
   const before = {};
@@ -456,7 +554,7 @@ function resolveRound(room) {
   const act = {};
   for (const id of living) {
     const st = d.adv[id];
-    const a = d.actions[id];
+    const a = d.actions[id] || (d.drafts && d.drafts[id]) || null;
     if (!a || a.type !== 'door') {
       act[id] = { type: 'rest', auto: !a };
       continue;
@@ -641,7 +739,7 @@ function resolveRound(room) {
 function logRound(room, d, r) {
   const n = (id) => nameOf(room, id);
   const entry = dlog(room).rounds[dlog(room).rounds.length - 1];
-  entry.choices = d.advIds.filter((id) => r.before[id].hp > 0).map((id) => {
+  entry.choices = d.advIds.filter((id) => r.before[id].hp > 0 && r.act[id]).map((id) => {
     const a = r.act[id];
     if (a.type === 'rest') return { player: n(id), choice: a.auto ? 'rest (timed out)' : 'rest' };
     return {
@@ -667,7 +765,7 @@ function logRound(room, d, r) {
 /* ---------- end-of-dungeon awards ---------- */
 function computeAwards(room, d) {
   const st = {};
-  for (const id of d.advIds) st[id] = { grabbed: 0, canary: 0, spite: 0, stolen: 0, sprints: 0, rests: 0, entered: 0, damage: 0 };
+  for (const id of d.advIds) st[id] = { grabbed: 0, canary: 0, spite: 0, stolen: 0, sprints: 0, rests: 0, entered: 0, damage: 0, scans: (d.scanCount || {})[id] || 0 };
   let dmDamage = 0;
   let kills = 0;
   for (const r of d.history) {
@@ -699,6 +797,7 @@ function computeAwards(room, d) {
     { key: 'robber', title: 'Grave Robber', stat: 'stolen', text: (v) => `stole ${v} gold as a ghost` },
     { key: 'daredevil', title: 'Daredevil', stat: 'sprints', text: (v) => `sprinted in ${v} time${v === 1 ? '' : 's'}` },
     { key: 'coward', title: 'Campfire Coward', stat: 'rests', text: (v) => `rested by the fire ${v} time${v === 1 ? '' : 's'}` },
+    { key: 'scout', title: 'The Scout', stat: 'scans', text: (v) => `scanned ${v} door${v === 1 ? '' : 's'} with the lantern` },
   ];
   const awards = [];
   for (const def of defs) {
@@ -724,28 +823,86 @@ function afterResults(room) {
   else startRound(room);
 }
 
-function endDungeon(room) {
+// early: the DM left, or too few players remain. Only gold that was actually put in play counts.
+function endDungeon(room, early) {
   const m = room.match;
   const d = m.dungeon;
   const N = d.advIds.length;
+  let P = d.P;
+  if (early) {
+    const placed = room.phase === 'dm' || room.phase === 'setup' ? d.round - 1 : d.round;
+    P = d.advIds.length * C.START_GOLD;
+    for (let r = 1; r <= placed; r++) P += C.goldBudget(d.doorsCount, r);
+    d.endedEarly = early;
+  }
   let sumHeld = 0;
   const scores = {};
   for (const id of d.advIds) {
     const held = d.adv[id].gold;
     sumHeld += held;
-    scores[id] = { role: 'adv', held, alive: d.adv[id].alive, score: Math.round(((held * N) / d.P) * 1000) / 10 };
+    scores[id] = { role: 'adv', held, alive: d.adv[id].alive, left: !!d.adv[id].left, score: Math.round(((held * N) / P) * 1000) / 10 };
   }
-  scores[d.dmId] = { role: 'dm', held: d.P - sumHeld, score: Math.round(((d.P - sumHeld) / d.P) * 1000) / 10 };
+  const dmLeft = early === 'dmLeft';
+  scores[d.dmId] = { role: 'dm', held: P - sumHeld, left: dmLeft, score: dmLeft ? 0 : Math.round(((P - sumHeld) / P) * 1000) / 10 };
+  d.P = P;
   for (const [id, s] of Object.entries(scores)) m.totals[id] = Math.round((m.totals[id] + s.score) * 10) / 10;
   d.scores = scores;
   d.awards = computeAwards(room, d);
+  stopAllScans(d, false);
   m.history.push({ dmId: d.dmId, P: d.P, scores });
   const L = dlog(room);
   L.scores = Object.fromEntries(Object.entries(scores).map(([id, sc]) => [nameOf(room, id), { role: sc.role, goldHeld: sc.held, score: sc.score }]));
   L.awards = d.awards.map((a) => ({ title: a.title, players: a.players.map((id) => nameOf(room, id)), text: a.text }));
   m.log.totals = Object.fromEntries(Object.entries(m.totals).map(([id, v]) => [nameOf(room, id), v]));
+  if (early) L.endedEarly = early === 'dmLeft' ? 'The DM left' : 'Too few players';
+  if (activePlayers(room).length < C.MIN_PLAYERS) return endMatch(room);
   setPhase(room, 'dungeonEnd', null);
   broadcast(room);
+}
+
+/* ---------- leaving a match ---------- */
+const activePlayers = (room) => room.players.filter((p) => !p.left);
+function endMatch(room) {
+  room.match.log.finished = new Date().toISOString();
+  setPhase(room, 'matchEnd', null);
+  broadcast(room);
+}
+// move on to the next dungeon whose DM is still here
+function nextDungeon(room) {
+  const m = room.match;
+  do { m.dIndex++; } while (m.dIndex < m.dmOrder.length && room.players.find((p) => p.id === m.dmOrder[m.dIndex] && p.left));
+  if (m.dIndex < m.dmOrder.length && activePlayers(room).length >= C.MIN_PLAYERS) startDungeon(room);
+  else endMatch(room);
+}
+function playerLeft(room, player) {
+  player.left = true;
+  player.connected = false;
+  player.socketId = null;
+  if (room.hostId === player.id) {
+    const next = room.players.find((p) => p.connected && !p.left);
+    if (next) room.hostId = next.id;
+  }
+  const m = room.match;
+  const d = m && m.dungeon;
+  if (m && m.log) (m.log.left = m.log.left || []).push({ player: player.name, at: room.phase, dungeon: m.dIndex + 1, round: d ? d.round : 0 });
+  if (!d || ['dungeonEnd', 'matchEnd'].includes(room.phase)) {
+    if (room.phase === 'dungeonEnd' && activePlayers(room).length < C.MIN_PLAYERS) return endMatch(room);
+    return broadcast(room);
+  }
+  stopScan(room, player.id, false);
+  if (player.id === d.dmId) { stopAllScans(d, false); return endDungeon(room, 'dmLeft'); }
+  if (d.adv[player.id]) {
+    // they walk out with their gold; it still counts for their score
+    d.adv[player.id].left = true;
+    delete d.actions[player.id];
+    if (d.drafts) delete d.drafts[player.id];
+    delete d.pos[player.id];
+  }
+  if (activePlayers(room).length < C.MIN_PLAYERS) return endDungeon(room, 'fewPlayers');
+  if (livingIds(d).length === 0 && room.phase !== 'results') return endDungeon(room, 'fewPlayers');
+  broadcast(room);
+  if (room.phase === 'setup') checkSetupDone(room);
+  if (room.phase === 'adv') checkAdvDone(room);
 }
 
 /* ============================================================
@@ -761,7 +918,7 @@ function viewFor(room, p) {
     now: Date.now(),
     settings: room.settings,
     config: PUBLIC_CONFIG,
-    players: room.players.map((x) => ({ id: x.id, name: x.name, connected: x.connected, guide: !!x.guide })),
+    players: room.players.map((x) => ({ id: x.id, name: x.name, connected: x.connected, guide: !!x.guide, left: !!x.left })),
     match: null,
     hasLastLog: !!room.lastLog,
   };
@@ -781,12 +938,18 @@ function viewFor(room, p) {
       let ready = false;
       if (room.phase === 'setup') ready = s.setupReady;
       if (room.phase === 'adv') ready = s.alive ? !!d.actions[id] : !!d.ghostDone[id];
-      return { id, hp: s.hp, gold: s.gold, affinity: s.affinity, alive: s.alive, ready };
+      return { id, hp: s.hp, gold: s.gold, affinity: s.affinity, alive: s.alive, left: !!s.left, ready };
     }),
-    doors: d.doors ? d.doors.map((x) => ({ gold: x.gold, clue: x.clue })) : null,
+    doors: d.doors ? d.doors.map((x, i) => {
+      if (role !== 'adv') return { gold: x.gold, clue: x.clue };
+      const k = (d.known[p.id] || {})[i];
+      return { gold: x.gold, clue: k ? k.clue : null };
+    }) : null,
+    scans: Object.fromEntries(Object.entries(d.scans || {}).map(([id, sc]) => [id, sc.door])),
     lastResult: showResult ? d.lastResult : null,
     scores: d.scores,
     awards: d.awards,
+    endedEarly: d.endedEarly || null,
   };
   if (role === 'dm') {
     dv.dm = {
@@ -803,7 +966,12 @@ function viewFor(room, p) {
   }
   if (role === 'adv' || role === 'ghost') {
     const s = d.adv[p.id];
-    dv.mine = { inv: s.inv, potions: s.potions, affinity: s.affinity, setupReady: s.setupReady, action: d.actions[p.id] || null, lens: d.lens[p.id] || [] };
+    const scan = d.scans && d.scans[p.id];
+    dv.mine = {
+      inv: s.inv, potions: s.potions, affinity: s.affinity, setupReady: s.setupReady, action: d.actions[p.id] || null,
+      flasks: s.flasks, flaskCap: C.flaskCap(d.doorsCount), flasksPerRound: C.flasksPerRound(d.doorsCount),
+      known: d.known[p.id] || {}, scanning: scan ? { door: scan.door, lens: scan.lens, left: Math.max(0, scan.endsAt - Date.now()) } : null,
+    };
   }
   dv.pos = d.pos;
   v.match.dungeon = dv;
@@ -854,6 +1022,7 @@ io.on('connection', (socket) => {
     if (!room) return reply(cb, { error: `No game with code ${code || '(blank)'}.` });
     if (!name) return reply(cb, { error: 'Enter a name.' });
     let player = room.players.find((p) => p.name.toLowerCase() === name.toLowerCase());
+    if (player && player.left && room.phase !== 'lobby') return reply(cb, { error: 'You left this match. You can join the next one from the lobby.' });
     if (player) {
       const sameToken = token && player.token === String(token);
       if (player.connected && !sameToken) return reply(cb, { error: `${player.name} is already in this game. Pick another name.` });
@@ -878,17 +1047,17 @@ io.on('connection', (socket) => {
   socket.on('leave', () => {
     const { room, player } = ctx(socket);
     if (!room || !player) return;
+    socket.leave(room.code);
+    socket.data.code = null;
     if (room.phase === 'lobby') {
       room.players = room.players.filter((p) => p.id !== player.id);
       if (room.hostId === player.id && room.players[0]) room.hostId = room.players[0].id;
-    } else {
-      player.connected = false;
-      player.socketId = null;
+      if (room.players.length === 0) rooms.delete(room.code);
+      else broadcast(room);
+      return;
     }
-    socket.leave(room.code);
-    socket.data.code = null;
-    if (room.players.length === 0) rooms.delete(room.code);
-    else broadcast(room);
+    playerLeft(room, player);
+    if (room.players.every((p) => !p.connected)) room.emptySince = Date.now();
   });
 
   socket.on('kick', ({ pid } = {}) => {
@@ -941,8 +1110,10 @@ io.on('connection', (socket) => {
     const it = C.SHOP[item];
     if (!st || !st.alive || !it) return;
     if (st.gold < it.cost) return reply(cb, { error: `You need ${it.cost} gold.` });
+    if (item === 'oil' && st.flasks >= C.flaskCap(d.doorsCount)) return reply(cb, { error: `Your lantern holds ${C.flaskCap(d.doorsCount)} flasks at most.` });
     st.gold -= it.cost;
     if (item === 'potion') st.potions++;
+    else if (item === 'oil') st.flasks++;
     else st.inv[item]++;
     shopLog(room, player.id, { bought: item, cost: it.cost });
     reply(cb, { ok: true });
@@ -963,17 +1134,34 @@ io.on('connection', (socket) => {
     broadcast(room);
   });
 
-  socket.on('lens', ({ door } = {}) => {
+  socket.on('scanStart', ({ door, lens } = {}, cb) => {
     const { room, player, d } = ctx(socket);
-    if (!d || room.phase !== 'adv') return;
+    if (!d || room.phase !== 'adv') return reply(cb, { error: 'You can only scan while choosing a door.' });
     const st = d.adv[player.id];
-    if (!st || !st.alive || st.inv.lens < 1) return;
-    if (!Number.isInteger(door) || door < 0 || door >= d.doorsCount) return;
-    const list = (d.lens[player.id] = d.lens[player.id] || []);
-    if (list.some((x) => x.door === door)) return;
-    st.inv.lens--;
-    list.push({ door, trap: d.doors[door].trap });
-    shopLog(room, player.id, { usedLens: ROMAN[door], saw: trapText(d.doors[door].trap) || 'no trap' });
+    if (!st || !st.alive || st.left) return reply(cb, { error: 'Only living adventurers can scan.' });
+    if (!Number.isInteger(door) || door < 0 || door >= d.doorsCount) return reply(cb, { error: 'Pick a door.' });
+    if (d.scans[player.id]) return reply(cb, { error: 'You are already scanning.' });
+    if (!nearDoor(d, d.pos[player.id], door)) return reply(cb, { error: 'Walk right up to the door first.' });
+    const known = (d.known[player.id] || {})[door];
+    if (known && (!lens || known.lens)) return reply(cb, { error: 'You already scanned this door.' });
+    if (st.flasks < 1) return reply(cb, { error: 'Your lantern is out of oil. The shopkeeper sells more.' });
+    if (lens && st.inv.lens < 1) return reply(cb, { error: 'You have no Lens.' });
+    const ms = scanMs();
+    if (room.deadline && room.deadline - Date.now() < ms + Math.round(250 * TIME_SCALE)) return reply(cb, { error: 'Not enough time left to scan.' });
+    st.flasks -= 1;
+    if (lens) st.inv.lens -= 1;
+    const scan = { door, lens: !!lens, endsAt: Date.now() + ms };
+    scan.timer = setTimeout(() => finishScan(room, player.id), ms);
+    d.scans[player.id] = scan;
+    io.to(room.code).emit('scan', { id: player.id, door, on: true });
+    reply(cb, { ok: true, ms });
+    broadcast(room);
+  });
+
+  socket.on('scanCancel', ({ reason } = {}) => {
+    const { room, player, d } = ctx(socket);
+    if (!d || !d.scans || !d.scans[player.id]) return;
+    stopScan(room, player.id, true, reason === 'moved' ? 'moved' : 'cancelled');
     broadcast(room);
   });
 
@@ -996,31 +1184,25 @@ io.on('connection', (socket) => {
     const { room, player, d } = ctx(socket);
     if (!d || room.phase !== 'adv') return;
     const st = d.adv[player.id];
-    if (!st || !st.alive) return;
-    if (!a || (a.type !== 'rest' && a.type !== 'door')) return reply(cb, { error: 'Pick a door or rest.' });
-    if (a.type === 'rest') {
-      d.actions[player.id] = { type: 'rest' };
-    } else {
-      if (!Number.isInteger(a.door) || a.door < 0 || a.door >= d.doorsCount) return reply(cb, { error: 'Pick a door.' });
-      if (!C.APPROACH[a.approach]) return reply(cb, { error: 'Pick Sprint, Walk or Sneak.' });
-      const clean = { type: 'door', door: a.door, approach: a.approach, armour: false, charm: null, lock: false, shove: null };
-      if (a.armour) { if (st.inv.armour < 1) return reply(cb, { error: 'You have no Armour.' }); clean.armour = true; }
-      if (a.charm) {
-        if (st.inv.charm < 1) return reply(cb, { error: 'You have no Charm.' });
-        if (!ELEMENTS.includes(a.charm)) return reply(cb, { error: 'Pick an element for the Charm.' });
-        clean.charm = a.charm;
-      }
-      if (a.lock) { if (st.inv.lock < 1) return reply(cb, { error: 'You have no Lock.' }); clean.lock = true; }
-      if (a.shove) {
-        if (st.inv.shove < 1) return reply(cb, { error: 'You have no Shove.' });
-        if (a.shove === player.id || !d.adv[a.shove] || !d.adv[a.shove].alive) return reply(cb, { error: 'Pick a living adventurer to shove.' });
-        clean.shove = a.shove;
-      }
-      d.actions[player.id] = clean;
-    }
+    if (!st || !st.alive || st.left) return;
+    const v = cleanAction(d, st, player.id, a);
+    if (v.error) return reply(cb, { error: v.error });
+    d.actions[player.id] = v.action;
     reply(cb, { ok: true });
     broadcast(room);
     checkAdvDone(room);
+  });
+
+  // the plan as it stands, used if time runs out before locking in
+  socket.on('actionDraft', (a) => {
+    const { room, player, d } = ctx(socket);
+    if (!d || room.phase !== 'adv') return;
+    const st = d.adv[player.id];
+    if (!st || !st.alive || st.left) return;
+    const v = cleanAction(d, st, player.id, a);
+    d.drafts = d.drafts || {};
+    if (v.action) d.drafts[player.id] = v.action;
+    else delete d.drafts[player.id];
   });
 
   socket.on('haunt', ({ target } = {}) => {
@@ -1039,29 +1221,34 @@ io.on('connection', (socket) => {
     const { room, player } = ctx(socket);
     if (!room || room.hostId !== player.id) return;
     if (room.phase === 'results') afterResults(room);
-    else if (room.phase === 'dungeonEnd') {
-      room.match.dIndex++;
-      if (room.match.dIndex < room.match.dmOrder.length) startDungeon(room);
-      else {
-        room.match.log.finished = new Date().toISOString();
-        setPhase(room, 'matchEnd', null);
-        broadcast(room);
-      }
-    }
+    else if (room.phase === 'dungeonEnd') nextDungeon(room);
   });
 
   /* ---------- waiting room ---------- */
-  socket.on('move', ({ x, y } = {}) => {
+  socket.on('move', ({ x, y, d: dir } = {}) => {
     const { room, player, d } = ctx(socket);
     if (!d || !canRoam(room.phase) || !d.adv[player.id]) return;
     x = Number(x); y = Number(y);
     if (!Number.isFinite(x) || !Number.isFinite(y)) return;
-    const now = Date.now();
-    if (player.lastMove && now - player.lastMove < ROOM.MOVE_MIN_MS) return;
-    player.lastMove = now;
-    const spot = { x: Math.max(0, Math.min(1, x)), y: Math.max(0, Math.min(1, y)) };
+    if (d.adv[player.id].left) return;
+    const spot = { x: Math.max(0, Math.min(1, x)), y: Math.max(0, Math.min(1, y)), d: FACING.includes(dir) ? dir : 'down' };
+    // always keep the newest position; if updates come too fast, send the latest one a moment later
     d.pos[player.id] = spot;
-    io.to(room.code).emit('pos', { id: player.id, ...spot });
+    const now = Date.now();
+    const wait = player.lastMove ? ROOM.MOVE_MIN_MS - (now - player.lastMove) : 0;
+    if (wait <= 0) {
+      player.lastMove = now;
+      io.to(room.code).emit('pos', { id: player.id, ...spot });
+    } else if (!player.movePending) {
+      player.movePending = setTimeout(() => {
+        player.movePending = null;
+        player.lastMove = Date.now();
+        const latest = room.match && room.match.dungeon && room.match.dungeon.pos[player.id];
+        if (latest) io.to(room.code).emit('pos', { id: player.id, ...latest });
+      }, wait);
+    }
+    const scan = d.scans && d.scans[player.id];
+    if (scan && !nearDoor(d, spot, scan.door)) { stopScan(room, player.id, true, 'moved'); broadcast(room); }
   });
 
   socket.on('emote', ({ i } = {}) => {
@@ -1078,8 +1265,8 @@ io.on('connection', (socket) => {
 
   socket.on('whisper', ({ to, i, door } = {}, cb) => {
     const { room, player, d } = ctx(socket);
-    if (!d || !canRoam(room.phase)) return reply(cb, { error: 'You can only huddle while the DM is building.' });
-    if (!d.adv[player.id] || !d.adv[to] || to === player.id) return reply(cb, { error: 'Pick someone to whisper to.' });
+    if (!d || !canRoam(room.phase)) return reply(cb, { error: 'You can only whisper in the room.' });
+    if (!d.adv[player.id] || !d.adv[to] || to === player.id || d.adv[to].left) return reply(cb, { error: 'Pick someone to whisper to.' });
     if (!nearEnough(d.pos[player.id], d.pos[to])) return reply(cb, { error: 'Walk right next to them first.' });
     let text = MESSAGES.huddle[i];
     if (!text) return reply(cb, { error: 'Pick a message.' });
@@ -1152,6 +1339,10 @@ setInterval(() => {
     }
   }
 }, 60 * 1000);
+
+// one bad message must never take the game down for everyone: log it and keep running
+process.on('uncaughtException', (e) => console.error('Unexpected error (server kept running):', e));
+process.on('unhandledRejection', (e) => console.error('Unexpected rejection (server kept running):', e));
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => console.log(`Greed & Spite running on port ${PORT}`));

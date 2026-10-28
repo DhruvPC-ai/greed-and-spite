@@ -108,6 +108,12 @@ const Sound = (() => {
     pop: () => tone({ type: 'triangle', f0: 880, f1: 1320, dur: 0.08, vol: 0.07 }),
     whisper: () => noise({ dur: 0.35, vol: 0.06, type: 'bandpass', f0: 3000, f1: 1800, q: 3, attack: 0.08 }),
     place: () => { tone({ type: 'square', f0: 160, f1: 90, dur: 0.12, vol: 0.12 }); noise({ dur: 0.08, vol: 0.12, type: 'lowpass', f0: 600 }); },
+    scan: (secs = 3) => {
+      tone({ type: 'sine', f0: 220, f1: 440, dur: secs, vol: 0.05, attack: 0.4 });
+      tone({ type: 'sine', f0: 223, f1: 446, dur: secs, vol: 0.04, attack: 0.4 });
+    },
+    rune: () => { [660, 880, 1320].forEach((f, i) => tone({ type: 'triangle', f0: f, dur: 0.25, vol: 0.08, delay: i * 0.07 })); },
+    shatter: () => { noise({ dur: 0.5, vol: 0.3, type: 'highpass', f0: 2500, f1: 6000 }); for (let i = 0; i < 6; i++) tone({ type: 'square', f0: 1800 - i * 200, dur: 0.06, vol: 0.05, delay: i * 0.04 }); },
     fanfare: () => { [523, 659, 784, 1047].forEach((f, i) => tone({ type: 'square', f0: f, dur: i === 3 ? 0.6 : 0.16, vol: 0.09, delay: i * 0.14 })); FX.coins(6); },
   };
 

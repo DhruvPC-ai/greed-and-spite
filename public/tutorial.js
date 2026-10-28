@@ -33,13 +33,28 @@ const Tutorial = (() => {
     },
     {
       key: 'doors',
-      title: 'Pick a door',
-      text: 'Each door shows its gold and a clue. A trapped door gives away its trap’s element. A silent door looks safe, but the DM can pay for an illusion to fake any clue.',
+      title: 'Doors and clues',
+      text: 'Every door shows its gold. Its clue, the element of the trap behind it, is hidden until you scan the door. A silent door looks safe, but the DM can fake any clue.',
       art: () => `
         <div class="trow end">
-          ${door({ gold: 30, clue: 'fire', label: 'Smoke', num: 'I' })}
+          ${door({ gold: 30, clue: 'none', label: '?', num: 'I' })}
           <div class="tcol tight">${tag(`${I('fire', 2)} Smoke = Fire trap`)}${tag(`${I('water', 2)} Dripping = Water trap`)}${tag(`${I('earth', 2)} Rumbling = Earth trap`)}${tag(`${I('air', 2)} Draft = Air trap`)}${tag('Silent = no trap?', 'muted')}</div>
-          ${door({ gold: 15, clue: 'none', label: 'Silent', num: 'II' })}
+          ${door({ gold: 15, clue: 'fire', label: 'Smoke', num: 'II' })}
+        </div>`,
+    },
+    {
+      key: 'scan',
+      title: 'Scan with your lantern',
+      text: 'Walk up to a door and scan it. It takes 3 seconds and one oil flask, and only you see the result. Everyone sees which door you lit up. A Lens shows the real trap, even through a fake clue.',
+      art: () => `
+        <div class="trow end">
+          <div class="tscan">
+            <div class="tscan-beyond"></div>
+            <div class="tscan-door"></div>
+            <div class="tscan-rune">${I('fire', 5)}<b>Fire</b></div>
+            <div class="tscan-lantern">${Sprites.lantern(3)}</div>
+          </div>
+          <div class="tcol tight">${tag(`${I('flask', 2)} New oil every round`)}${tag('Only you see the result')}${tag(`${I('eye', 2)} Lens: see through lies`, 'gold')}${tag('Whisper what you saw, or lie', 'spite')}</div>
         </div>`,
     },
     {
@@ -93,12 +108,12 @@ const Tutorial = (() => {
     {
       key: 'shop',
       title: 'While you wait',
-      text: 'While the DM builds, walk around the hall, say things, and whisper to whoever stands next to you. Tap the merchant to shop. Items are single use, and gold you spend no longer counts toward your score.',
+      text: 'Walk around with the arrow keys, or tap where to go. Walk up to the shopkeeper to shop (he sells oil too), and up to anyone to whisper. Your journal keeps what you learned. Spent gold no longer counts toward your score.',
       art: () => `
         <div class="trow end">
           <div class="tcol tight"><div class="tfire">${Sprites.flame(4)}<div class="tlogs"></div></div><span class="tt-sit">${Sprites.sitting(2, 'air', 3)}</span><span class="tfloat heal">+10 HP</span></div>
           <div class="titems">
-            ${[['potion', 'Potion', 'Heal 40'], ['shield', 'Armour', 'Half damage'], ['amulet', 'Charm', 'Resist an element'], ['eye', 'Lens', 'See one trap'], ['lock', 'Lock', 'Take all, lock others out'], ['push', 'Shove', 'Push someone in first']].map(([ic, n, d]) => `
+            ${[['potion', 'Potion', 'Heal 40'], ['flask', 'Oil', 'One more scan'], ['shield', 'Armour', 'Half damage'], ['eye', 'Lens', 'Scan sees the truth'], ['lock', 'Lock', 'Take all, lock others out'], ['push', 'Shove', 'Push someone in first']].map(([ic, n, d]) => `
               <div class="titem">${I(ic, 3)}<b>${n}</b><span>${d}</span></div>`).join('')}
           </div>
         </div>`,

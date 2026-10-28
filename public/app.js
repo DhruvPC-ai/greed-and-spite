@@ -70,6 +70,8 @@ socket.on('state', (v) => {
   store.set('gs_code', v.code);
   syncLocal();
   if (S.phase === 'lobby' && !store.get('gs_tut_seen') && !Tutorial.isOpen()) openTutorial(0);
+  const sk = D() ? `${S.phase}:${S.match.dIndex}:${D().round}:${D().role}` : S.phase;
+  if (sk !== ui.sheetKey) { ui.sheetKey = sk; ui.sheet = defaultSheet(); ui.near = null; if (S.phase !== 'adv') { ScanView.close(); Room.setMyScan(false); } }
   const need = needsMe() ? `${S.phase}:${S.match.dIndex}:${D().round}` : null;
   if (need && need !== lastNeed) Sound.play('yourTurn');
   lastNeed = need;
@@ -93,71 +95,153 @@ function stillOwes() {
   if (S.phase === 'adv' && d.role === 'ghost') return !d.ghostDone;
   return true;
 }
-let nearKey = '';
-function checkNear() {
-  const k = nearbyIds().join(',');
-  if (k !== nearKey) { nearKey = k; renderPanel(); }
-}
-socket.on('pos', ({ id, x, y }) => {
+/* ---------- the room: movement, nearby things, talking ---------- */
+// which view is on screen: the top-down room, or the side-view door hall
+function viewMode() {
   const d = D();
-  if (!d || !d.pos) return;
-  if (id === S.me) return;
-  d.pos[id] = { x, y };
+  if (!d || ['results', 'dungeonEnd', 'matchEnd'].includes(S.phase)) return 'hall';
+  if (S.phase === 'dm' && d.role === 'dm') return 'hall';
+  return 'room';
+}
+socket.on('pos', ({ id, x, y, d: dir }) => {
+  const d = D();
+  if (!d || !d.pos || id === S.me) return;
+  d.pos[id] = { x, y, d: dir };
+  Room.setPos(id, d.pos[id]);
   const a = d.advs.find((q) => q.id === id);
   Scene.setPos(id, x, y, a ? a.alive : true);
-  checkNear();
 });
-socket.on('emote', ({ id, text }) => { Scene.say(id, text); Sound.play('pop'); });
+socket.on('emote', ({ id, text }) => { Room.say(id, text); Scene.say(id, text); Sound.play('pop'); });
 socket.on('whisper', ({ from, text }) => {
-  Scene.say(from, text, 'whisper');
+  Room.say(from, text, 'whisper');
   ui.whispers.unshift({ from, to: S.me, text });
   Sound.play('whisper');
-  renderPanel();
+  if (ui.sheet === 'whisper') renderSheetOnly();
+  else toast(`${pname(from)} whispered to you. Open Say to read it.`);
 });
 socket.on('huddle', ({ a, b }) => {
   if (a === S.me || b === S.me) return;
-  Scene.say(a, '…', 'huddle');
-  Scene.say(b, '…', 'huddle');
+  Room.say(a, '…', 'huddle');
+  Room.say(b, '…', 'huddle');
 });
-
-// tapping the hall: walk, walk up to someone, or visit the merchant
-let moveTimer = null, moveQueued = null, lastMoveAt = 0;
-function sendMove(spot) {
-  moveQueued = spot;
-  const wait = Math.max(0, 130 - (Date.now() - lastMoveAt));
-  clearTimeout(moveTimer);
-  moveTimer = setTimeout(() => { lastMoveAt = Date.now(); socket.emit('move', moveQueued); }, wait);
-}
-function walkTo(spot) {
+Room.onSend((p) => {
   const d = D();
   if (!d) return;
-  const me = d.advs.find((q) => q.id === S.me);
-  d.pos[S.me] = spot;
-  Scene.walkMe(spot.x, spot.y, me ? me.alive : true);
-  sendMove(spot);
-  checkNear();
-}
-Scene.onTap((t) => {
-  const d = D();
-  if (!d || !d.pos) return;
-  if (t.type === 'floor') walkTo({ x: t.x, y: t.y });
-  else if (t.type === 'actor' && d.pos[t.id]) { walkTo(Scene.besideSpot(d.pos[t.id])); ui.whisperTo = t.id; }
-  else if (t.type === 'merchant') {
-    walkTo(Scene.merchantSpot());
-    merchantTalk();
-    setTimeout(() => { const shop = document.querySelector('.shop-win'); if (shop) shop.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 450);
-  }
+  d.pos[S.me] = p;
+  socket.emit('move', p);
 });
+Room.onNear((n) => {
+  ui.near = n;
+  if (viewMode() === 'room') renderHudOnly();
+  if (ui.sheet === 'whisper') renderSheetOnly();
+});
+Room.onAction(() => roomAction());
+function roomAction() {
+  const n = ui.near;
+  if (!n) return;
+  if (n.type === 'shop') { openSheet('shop'); merchantTalk(); }
+  else if (n.type === 'door') { if (scanState(n.i).ok) startScan(n.i); else chooseDoor(n.i); }
+  else if (n.type === 'fire') restNow();
+  else if (n.type === 'person') { ui.whisperTo = n.id; ui.whisperPick = null; openSheet('whisper'); }
+}
+function chooseDoor(i) {
+  ui.adv.door = i;
+  ui.adv.resting = false;
+  sendPlanDraft();
+  openSheet('journal');
+}
+// can I scan this door right now? and what should the button say?
+function scanState(i) {
+  const d = D();
+  if (!d || d.role !== 'adv' || S.phase !== 'adv') return { ok: false, label: '' };
+  const mine = d.mine;
+  const R = ROMAN[i];
+  const lensOn = ui.useLens && mine.inv.lens > 0;
+  const k = mine.known[i];
+  if (mine.scanning) return { ok: false, label: 'Scanning…' };
+  if (k && !(lensOn && !k.lens)) return { ok: false, label: `Door ${R} scanned` };
+  if (mine.flasks < 1) return { ok: false, label: 'Out of oil' };
+  const left = S.deadline ? S.deadline - (Date.now() + clockOffset) : 1e9;
+  if (left < cfg().SCAN_MS + 400) return { ok: false, label: 'No time to scan' };
+  return { ok: true, label: lensOn ? `Scan Door ${R} with Lens` : `Scan Door ${R}`, lens: lensOn };
+}
+function startScan(i) {
+  const st = scanState(i);
+  if (!st.ok) return toast(st.label);
+  socket.emit('scanStart', { door: i, lens: !!st.lens }, (r) => {
+    if (!r || r.error) return toast((r && r.error) || 'Could not scan.');
+    ScanView.show(i, r.ms, !!st.lens);
+    Room.setMyScan(true);
+    Sound.play('scan', r.ms / 1000);
+    if (st.lens) ui.useLens = false;
+  });
+}
+socket.on('scan', ({ id, door, on }) => { Room.setScan(id, door, on); });
+socket.on('scanResult', (res) => {
+  Room.setMyScan(false);
+  if (res.cancelled) ScanView.cancel(res.reason);
+  else ScanView.reveal(res);
+});
+Room.onCancelScan(() => socket.emit('scanCancel', { reason: 'moved' }));
+// a whisper that names a door gets filed on that door's journal page
+function doorIn(text) {
+  const m = String(text).match(/\bDoor (IV|III|II|I)\b/);
+  return m ? ROMAN.indexOf(m[1]) : -1;
+}
+
+function restNow() {
+  ui.adv.door = null;
+  ui.adv.resting = true;
+  socket.emit('action', { type: 'rest' }, (r) => {
+    ack(r);
+    if (r && r.ok) { Sound.play('lockIn'); toast('You’ll rest by the fire this round. You can change your mind until time runs out.'); }
+  });
+  render();
+}
+// the plan as it stands counts if time runs out before you lock in
+function sendPlanDraft() {
+  const a = ui.adv;
+  if (!a || a.door === null || !S || S.phase !== 'adv') return;
+  socket.emit('actionDraft', { type: 'door', door: a.door, approach: a.approach, armour: a.armour, lock: a.lock, charm: a.charm || null, shove: a.shove || null });
+}
 function merchantTalk() {
   const lines = (S && cfg().MESSAGES.merchant) || [];
-  if (lines.length) Scene.say('merchant', lines[Math.floor(Math.random() * lines.length)]);
+  if (!lines.length) return;
+  const line = lines[Math.floor(Math.random() * lines.length)];
+  if (viewMode() === 'room') Room.say('merchant', line); else Scene.say('merchant', line);
   ui.merchantNext = Date.now() + 9000 + Math.random() * 8000;
 }
 setInterval(() => {
-  if (!S || !D() || !['setup', 'dm'].includes(S.phase)) return;
+  if (!S || !D() || !['setup', 'dm', 'adv'].includes(S.phase)) return;
   if (!ui.merchantNext) ui.merchantNext = Date.now() + 4000;
   if (Date.now() > ui.merchantNext) merchantTalk();
 }, 1000);
+
+/* ---------- settings: animations and fullscreen ---------- */
+function animOff() {
+  const pref = store.get('gs_anim');
+  if (pref === 'on') return false;
+  if (pref === 'off') return true;
+  return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+window.GSAnimOff = animOff;
+function applyAnim() { document.documentElement.classList.toggle('anim-off', animOff()); }
+applyAnim();
+const canFullscreen = () => !!(document.fullscreenEnabled || document.webkitFullscreenEnabled);
+const inFullscreen = () => !!(document.fullscreenElement || document.webkitFullscreenElement);
+const isIPhone = () => /iPhone|iPod/.test(navigator.userAgent);
+const installedApp = () => window.matchMedia('(display-mode: standalone)').matches || window.matchMedia('(display-mode: fullscreen)').matches || navigator.standalone === true;
+function toggleFullscreen() {
+  const el = document.documentElement;
+  try {
+    if (inFullscreen()) (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+    else {
+      const r = (el.requestFullscreen || el.webkitRequestFullscreen).call(el);
+      if (r && r.catch) r.catch(() => toast('This browser won’t go full screen.'));
+    }
+  } catch (e) { toast('This browser won’t go full screen.'); }
+}
+document.addEventListener('fullscreenchange', () => { if (ui.sheet === 'menu') renderSheetOnly(); setTimeout(() => Room.fit(), 100); });
 
 socket.on('kicked', () => { store.del('gs_code'); S = null; render(); toast('The host removed you from the game.'); });
 socket.on('disconnect', () => toast('Connection lost. Reconnecting…'));
@@ -196,6 +280,8 @@ function syncLocal() {
   if (ui.advKey !== key) {
     ui.advKey = key;
     ui.adv = { door: null, resting: false, approach: 'walk', armour: false, charm: '', lock: false, shove: '' };
+    ui.marks = {};
+    ui.useLens = false;
     ui.whisperTo = null;
     ui.whisperPick = null;
     ui.whispers = [];
@@ -245,16 +331,27 @@ function render() {
           <section>
             <div class="stage-title" id="stage-title"></div>
             <div id="scene-slot"></div>
+            <div id="room-slot"></div>
+            <div id="hud"></div>
             <div id="panel"></div>
           </section>
           <aside id="side"></aside>
         </div>`;
       screen = 'game';
       Scene.mount(document.getElementById('scene-slot'));
+      Room.mount(document.getElementById('room-slot'));
     }
     document.getElementById('bar').innerHTML = renderBar();
     const dd = D();
-    const sticky = dd && ((S.phase === 'dm' && dd.role === 'dm') || ((S.phase === 'dm' || S.phase === 'setup') && dd.role !== 'dm'));
+    const mode = viewMode();
+    const inRoom = mode === 'room';
+    document.getElementById('scene-slot').hidden = inRoom;
+    document.getElementById('room-slot').hidden = !inRoom;
+    document.getElementById('hud').hidden = !inRoom;
+    document.querySelector('.game').classList.toggle('room-mode', inRoom);
+    document.getElementById('hud').innerHTML = inRoom ? renderHud() : '';
+    Room.setActive(inRoom);
+    const sticky = dd && !inRoom && S.phase === 'dm' && dd.role === 'dm';
     document.querySelector('.game').classList.toggle('sticky-scene', !!sticky);
     document.documentElement.style.setProperty('--bar-h', document.getElementById('bar').offsetHeight + 'px');
     const slot = document.getElementById('scene-slot');
@@ -262,9 +359,22 @@ function render() {
     document.getElementById('stage-title').innerHTML = renderTitle();
     renderPanel();
     document.getElementById('side').innerHTML = renderSide();
-    Scene.update(S, ui);
+    if (inRoom) Room.update(S, ui); else Scene.update(S, ui);
   }
-  $modal.innerHTML = ui.rules ? renderRules() : Tutorial.isOpen() ? Tutorial.html() : '';
+  $modal.innerHTML = ui.confirmLeave ? renderLeaveConfirm() : ui.rules ? renderRules() : Tutorial.isOpen() ? Tutorial.html() : '';
+}
+function renderHudOnly() {
+  const h = document.getElementById('hud');
+  if (h && viewMode() === 'room') h.innerHTML = renderHud();
+}
+function renderSheetOnly() {
+  const host = document.getElementById('sheet-host');
+  if (host) host.innerHTML = renderSheet();
+}
+function openSheet(name) {
+  ui.sheet = name;
+  render();
+  if (name === 'shop' || name === 'whisper' || name === 'say') Sound.play('click');
 }
 function renderPanel() {
   const el = document.getElementById('panel');
@@ -371,8 +481,7 @@ function renderBar() {
     ${chips}
     <span class="spacer"></span>
     <span class="timer" id="timer" hidden>${Sprites.icon('hourglass', 2)}<span id="timer-val"></span></span>
-    ${soundBtn()}
-    <button class="pbtn sm quiet" data-act="tut">How to play</button>`;
+    <button class="pbtn sm quiet" data-act="sheet" data-v="menu" aria-haspopup="dialog">Menu</button>`;
 }
 
 function renderTitle() {
@@ -381,29 +490,27 @@ function renderTitle() {
   const t = (h, p) => `<h2>${h}</h2>${p ? `<p>${p}</p>` : ''}${help}`;
   if (S.phase === 'matchEnd') return t('The hoard is counted', '');
   if (S.phase === 'dungeonEnd') return t(`${esc(pname(d.dmId))}’s dungeon is done`, '');
-  if (S.phase === 'setup') return t(d.role === 'dm' ? 'You are the dungeon master' : 'Gear up', d.role === 'dm' ? 'The adventurers are getting ready.' : 'Pick your element and visit the shop.');
-  if (S.phase === 'dm') return t(d.role === 'dm' ? 'Set your traps' : `${esc(pname(d.dmId))} is setting traps`, d.role === 'dm' ? 'The doors above preview what adventurers will see.' : 'Shop while you wait. Talk it over, and lie if it helps.');
+  if (S.phase === 'setup') return t(d.role === 'dm' ? 'You are the dungeon master' : 'Gear up', d.role === 'dm' ? 'The adventurers are getting ready.' : 'Pick your element. The shopkeeper at the counter sells items.');
+  if (S.phase === 'dm') return t(d.role === 'dm' ? 'Set your traps' : `${esc(pname(d.dmId))} is setting traps`, d.role === 'dm' ? 'The doors above preview what adventurers will see.' : 'The doors are sealed. Walk around, shop, and whisper while you wait.');
   if (S.phase === 'adv') {
-    if (d.role === 'dm') return t('The adventurers are choosing', '');
-    if (d.role === 'ghost') return t('You are a ghost', 'You see every real trap.');
-    return t('Choose a door', 'Tap a door, then choose how you go in.');
+    if (d.role === 'dm') return t('The adventurers are choosing', 'Watch them. Your traps show on the doors.');
+    if (d.role === 'ghost') return t('You are a ghost', 'You see every real trap. Haunt someone, or whisper lies.');
+    return t('Choose a door', 'Walk up to a door to scan it or choose it. Your journal keeps what you learn.');
   }
   if (S.phase === 'results') return t(`Round ${d.round}: the doors open`, '');
   return '';
 }
 
 /* ---------- side ---------- */
-function renderSide() {
+function partyRows() {
   const d = D();
-  if (!d) return '';
-  if (S.phase === 'matchEnd') return `<div class="win"><div class="win-title">Score by dungeon</div>${renderHistory()}</div>`;
   const hiding = S.phase === 'results' && d.lastResult && Scene.isPlaying();
   const view = d.advs.map((a) => {
     if (!hiding) return a;
     const b = d.lastResult.before[a.id];
     return { ...a, hp: b.hp, gold: b.gold, alive: b.hp > 0 };
   });
-  const rows = view.map((a) => {
+  const rows = view.filter((a) => !a.left).map((a) => {
     const p = S.players.find((x) => x.id === a.id);
     const pct = Math.max(0, Math.round((a.hp / cfg().START_HP) * 100));
     const cls = pct <= 30 ? 'low' : pct <= 60 ? 'mid' : '';
@@ -420,10 +527,18 @@ function renderSide() {
       </span>
     </li>`;
   }).join('');
+  return rows;
+}
+function renderSide() {
+  const d = D();
+  if (!d) return '';
+  if (S.phase === 'matchEnd') return `<div id="sheet-host">${renderSheet()}</div><div class="win"><div class="win-title">Score by dungeon</div>${renderHistory()}</div>`;
+  const rows = partyRows();
   const m = S.match;
   const totals = m.history.length ? `<div class="win"><div class="win-title">Match scores</div><table class="scores"><tbody>${[...m.dmOrder].sort((a, b) => m.totals[b] - m.totals[a]).map((id) => `<tr><td>${esc(pname(id))}</td><td class="num">${m.totals[id].toFixed(1)}</td></tr>`).join('')}</tbody></table></div>` : '';
   return `
-    <div class="win">
+    <div id="sheet-host">${renderSheet()}</div>
+    <div class="win party-win">
       <div class="win-title">The party</div>
       <p class="small" style="margin-bottom:6px"><span class="tag host">DM</span> ${esc(pname(d.dmId))}</p>
       <ul class="party">${rows}</ul>
@@ -439,13 +554,13 @@ function renderSide() {
 function panelHtml() {
   const d = D();
   if (!d && S.phase !== 'matchEnd') return '';
+  if (viewMode() === 'room') return '';
   if (S.phase === 'matchEnd') return renderMatchEnd();
   if (S.phase === 'dungeonEnd') return renderDungeonEnd();
   if (S.phase === 'setup') return renderSetup();
   if (S.phase === 'dm') {
     if (d.role === 'dm') return renderDmBuilder();
-    if (d.role === 'ghost') return renderWaitingRoom('ghost', 'Once the doors are set, you’ll see every trap.');
-    return renderWaitingRoom('adventurer', 'The doors open for choosing as soon as the DM is done.') + renderShop();
+    return '';
   }
   if (S.phase === 'adv') return d.role === 'dm' ? renderDmWatch() : d.role === 'ghost' ? renderGhost() : renderAdventurer();
   if (S.phase === 'results') return renderResults();
@@ -456,6 +571,8 @@ function steps(list) {
   const firstOpen = list.findIndex((x) => !x.done);
   return `<div class="steps">${list.map((x, k) => `<span class="step ${x.done ? 'done' : k === firstOpen ? 'now' : ''}"><b>${k + 1}</b>${x.text}</span>`).join('')}</div>`;
 }
+const SHORT = { fire: 'Smoke', water: 'Dripping', earth: 'Rumbling', air: 'Draft', none: 'Silent' };
+const elementTag = (clue, aff) => (!aff || clue === 'none' ? '' : clue === aff ? ' <b class="rd-warn resist">Resist</b>' : cfg().WEAK_TO[aff] === clue ? ' <b class="rd-warn weak">Weak</b>' : '');
 const elementWarning = (clue, aff) => {
   if (!aff || clue === 'none') return '';
   if (clue === aff) return `<span class="sd-warn resist" style="position:static;transform:none">Resist</span> You resist ${cap(clue)}: half damage.`;
@@ -481,13 +598,11 @@ function renderSetup() {
     </button>`).join('');
   return `
     <div class="win"><div class="win-title">Your element <span class="muted">Everyone will see it</span></div><div class="seg">${aff}</div></div>
-    ${renderShop()}
     <div class="win">
       ${mine.setupReady ? '<div class="note" style="margin:0">You’re ready. Waiting for the others.</div>' :
       `<button class="pbtn gold" data-act="setupReady" ${mine.affinity ? '' : 'disabled'}>I’m ready</button>
        ${mine.affinity ? '' : '<span class="muted small" style="margin-left:10px">Pick an element first.</span>'}`}
-    </div>
-    ${renderWaitingRoom('adventurer', '')}`;
+    </div>`;
 }
 
 /* ----- shop ----- */
@@ -497,18 +612,138 @@ function renderShop() {
   const mine = d.mine;
   const me = advOf(S.me);
   const items = Object.entries(c.SHOP).map(([k, it]) => {
-    const owned = k === 'potion' ? mine.potions : mine.inv[k];
+    const owned = k === 'potion' ? mine.potions : k === 'oil' ? `${mine.flasks} of ${mine.flaskCap}` : mine.inv[k];
     return `<div class="item">
       <div class="top"><span>${it.name}</span><span class="gold">${Sprites.icon('coin', 2)} ${it.cost}</span></div>
       <p>${it.text}</p>
       <div class="row">
-        <button class="pbtn sm" data-act="buy" data-item="${k}" ${me.gold < it.cost ? 'disabled' : ''}>Buy</button>
+        <button class="pbtn sm" data-act="buy" data-item="${k}" ${me.gold < it.cost || (k === 'oil' && mine.flasks >= mine.flaskCap) ? 'disabled' : ''}>Buy</button>
         <span class="muted small">You have ${owned}</span>
         ${k === 'potion' && mine.potions > 0 ? `<button class="pbtn sm" data-act="drink" ${me.hp >= c.START_HP ? 'disabled' : ''}>Drink</button>` : ''}
       </div>
     </div>`;
   }).join('');
-  return `<div class="win shop-win"><div class="win-title">Shop <span class="muted">You have <span class="gold">${me.gold}</span> gold and ${me.hp} HP. Spent gold goes to the DM.</span></div><div class="grid2">${items}</div></div>`;
+  return `<div class="shop-win"><div class="keeper-row"><span class="portrait">${Sprites.merchant(3)}</span><p class="small" style="margin:0">You have <span class="gold">${me.gold}</span> gold and ${me.hp} HP. Every item is single use. Gold you spend goes to the DM and no longer counts toward your score.</p></div><div class="items">${items}</div></div>`;
+}
+
+/* ----- action bar under the room ----- */
+function sheetBtn(name, label, dot) {
+  return `<button class="pbtn ${ui.sheet === name ? 'on' : ''}" data-act="sheet" data-v="${name}">${label}${dot ? '<span class="dot" aria-label="needs you"></span>' : ''}</button>`;
+}
+function renderHud() {
+  const d = D();
+  if (!d) return '';
+  const role = d.role;
+  const btns = [];
+  if (role === 'adv' || role === 'ghost') {
+    const n = ui.near;
+    let label = role === 'ghost' ? 'Float up to someone' : 'Walk up to something';
+    if (n && n.type === 'door') {
+      const st = scanState(n.i);
+      btns.push(`<button class="pbtn gold act-btn" data-act="scanDoor" data-i="${n.i}" ${st.ok ? '' : 'disabled'}>${Sprites.icon('flask', 2)} ${st.label}</button>`);
+      btns.push(`<button class="pbtn" data-act="chooseDoor" data-i="${n.i}">Choose Door ${ROMAN[n.i]}</button>`);
+    } else {
+      if (n) label = n.type === 'shop' ? 'Shop' : n.type === 'fire' ? 'Rest by the fire' : `Whisper to ${esc(pname(n.id))}`;
+      btns.push(`<button class="pbtn gold act-btn" data-act="roomAct" ${n ? '' : 'disabled'}>${label}</button>`);
+    }
+  }
+  if (role === 'adv' && d.mine && ['setup', 'dm', 'adv'].includes(S.phase)) {
+    btns.push(`<span class="oil-chip" title="Oil for your lantern: one flask per scan">${Sprites.icon('flask', 2)} ${d.mine.flasks}/${d.mine.flaskCap}</span>`);
+    if (S.phase === 'adv' && d.mine.inv.lens > 0) btns.push(`<button class="pbtn ${ui.useLens ? 'on' : ''}" data-act="lensToggle" aria-pressed="${!!ui.useLens}">${Sprites.icon('eye', 2)} Lens ${ui.useLens ? 'on' : 'off'}</button>`);
+  }
+  if (S.phase === 'setup' && role === 'adv') btns.push(sheetBtn('setup', 'Gear up', !d.mine.setupReady));
+  if (S.phase === 'adv' && role === 'adv') btns.push(sheetBtn('journal', 'Journal', !d.mine.action));
+  if (S.phase === 'adv' && role === 'ghost') btns.push(sheetBtn('haunt', 'Haunt', !d.ghostDone));
+  if (role === 'dm') btns.push(sheetBtn('dm', 'Dungeon', false));
+  btns.push(sheetBtn('say', 'Say', false));
+  btns.push(`<button class="pbtn party-btn ${ui.sheet === 'party' ? 'on' : ''}" data-act="sheet" data-v="party">Party</button>`);
+  const touch = window.matchMedia('(pointer: coarse)').matches;
+  const hint = role === 'dm' ? 'You’re watching the room.' : touch ? 'Tap where to go. Tap someone to walk up to them.' : 'Walk with the arrow keys or WASD. Press E to use what you’re next to, or click where to go.';
+  return `<div class="hud">${btns.join('')}</div><p class="hud-hint">${hint}</p>`;
+}
+function defaultSheet() {
+  const d = D();
+  if (!d) return null;
+  const wide = window.innerWidth >= 960;
+  if (S.phase === 'setup' && d.role === 'adv' && !d.mine.setupReady) return 'setup';
+  if (S.phase === 'adv' && d.role === 'adv' && wide) return 'journal';
+  if (S.phase === 'adv' && d.role === 'ghost' && wide) return 'haunt';
+  if ((S.phase === 'adv' || S.phase === 'setup') && d.role === 'dm' && wide) return 'dm';
+  return null;
+}
+function renderSheet() {
+  const d = D();
+  const name = ui.sheet;
+  if (!name || !S) return '';
+  let title = '', body = '';
+  if (name === 'menu') { title = 'Menu'; body = renderMenu(); }
+  else if (!d) return '';
+  else if (name === 'setup' && d.role === 'adv') { title = 'Gear up'; body = renderSetup(); }
+  else if ((name === 'journal' || name === 'plan') && d.role === 'adv' && S.phase === 'adv') { title = 'Journal'; body = renderJournal(); }
+  else if (name === 'haunt' && d.role === 'ghost' && S.phase === 'adv') { title = 'Haunt'; body = renderGhost(); }
+  else if (name === 'dm' && d.role === 'dm') { title = 'Your dungeon'; body = S.phase === 'adv' ? renderDmWatch() : renderSetup(); }
+  else if (name === 'shop' && d.role === 'adv') { title = 'The shopkeeper'; body = renderShop(); }
+  else if (name === 'say') { title = 'Say something'; body = renderSay(); }
+  else if (name === 'whisper') { title = 'Whisper'; body = renderWhisper(); }
+  else if (name === 'party') { title = 'The party'; body = renderPartyList(); }
+  else return '';
+  return `<div class="win sheet open" role="dialog" aria-label="${title}">
+    <div class="sheet-head"><h3>${title}</h3><button class="pbtn sm" data-act="sheetClose" aria-label="Close">✕</button></div>
+    ${body}
+  </div>`;
+}
+function renderSay() {
+  const voice = myVoice();
+  const list = (voice && cfg().MESSAGES[voice]) || [];
+  const cooling = Date.now() < ui.sayUntil;
+  const heard = ui.whispers.slice(0, 4).map((w) => `<p class="small" style="margin:6px 0 0"><span class="ghostname">${w.from === S.me ? `You whispered to ${esc(pname(w.to))}` : `${esc(pname(w.from))} whispered`}:</span> ${esc(w.text)}</p>`).join('');
+  return `<p class="muted small" style="margin-top:0">Everyone sees it above your head.</p>
+    <div class="says">${list.map((t, k) => `<button class="say-chip" data-act="say" data-i="${k}" ${cooling ? 'disabled' : ''}>${esc(t)}</button>`).join('')}</div>
+    ${heard ? `<div class="huddle-box" style="margin-top:12px">${heard}</div>` : ''}`;
+}
+function renderWhisper() {
+  const near = Room.nearPeople();
+  const to = ui.whisperTo && near.includes(ui.whisperTo) ? ui.whisperTo : near[0];
+  const huddle = cfg().MESSAGES.huddle || [];
+  const heard = ui.whispers.slice(0, 4).map((w) => `<p class="small" style="margin:6px 0 0"><span class="ghostname">${w.from === S.me ? `You whispered to ${esc(pname(w.to))}` : `${esc(pname(w.from))} whispered`}:</span> ${esc(w.text)}</p>`).join('');
+  if (!to) return `<p class="muted" style="margin:0">Walk right up to someone to whisper. Everyone sees you huddle, but only they read it.</p>${heard}`;
+  const pick = ui.whisperPick !== null ? huddle[ui.whisperPick] : null;
+  return `
+    ${near.length > 1 ? `<div class="seg" style="margin-bottom:8px">${near.map((id) => `<button class="pbtn sm ${id === to ? 'on' : ''}" data-act="whisperTo" data-id="${id}">${esc(pname(id))}</button>`).join('')}</div>` : ''}
+    <p class="small" style="margin:0 0 8px">Whisper to <b>${esc(pname(to))}</b>. Everyone sees you huddle; only they read it.</p>
+    ${pick ? `<div class="note" style="margin:0 0 8px">${esc(pick.split('{door}').join('…'))} <span class="muted">Which door?</span>
+      <div class="seg" style="margin-top:6px">${Array.from({ length: D().doorsCount }, (_, k) => `<button class="pbtn sm" data-act="whisperDoor" data-i="${k}">Door ${ROMAN[k]}</button>`).join('')}<button class="pbtn sm quiet" data-act="whisperCancel">Cancel</button></div></div>` : ''}
+    <div class="says">${huddle.map((t, k) => `<button class="say-chip whisper" data-act="whisper" data-i="${k}" data-id="${to}">${esc(t.split('{door}').join('…'))}</button>`).join('')}</div>
+    ${heard}`;
+}
+function renderPartyList() {
+  return `<ul class="party">${partyRows()}</ul>`;
+}
+function renderMenu() {
+  const device = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let full = '';
+  if (installedApp()) full = '';
+  else if (canFullscreen()) full = `<button class="pbtn" data-act="fullscreen">${inFullscreen() ? 'Leave full screen' : 'Full screen'}</button>`;
+  else if (isIPhone()) full = `<p class="small muted" style="margin:0">For full screen on iPhone: tap Share, then <b>Add to Home Screen</b>, and open the game from there.</p>`;
+  const inGame = !!(S && S.match);
+  return `<div class="menu-list">
+    <button class="pbtn" data-act="sound">Sound: ${Sound.isMuted() ? 'off' : 'on'}</button>
+    <button class="pbtn" data-act="anim">Animations: ${animOff() ? 'off' : 'on'}</button>
+    ${device && !animOff() ? '' : device ? '<p class="small muted" style="margin:0">Your device asks for less motion, so animations start off. You can turn them on here.</p>' : ''}
+    ${full}
+    <button class="pbtn" data-act="tut">How to play</button>
+    <button class="pbtn" data-act="rules">Full rules</button>
+    ${inGame ? '<button class="pbtn" data-act="leaveAsk" style="color:#ff9a8c">Leave match</button>' : ''}
+  </div>`;
+}
+function renderLeaveConfirm() {
+  const d = D();
+  const amDm = d && d.dmId === S.me && !['dungeonEnd', 'matchEnd'].includes(S.phase);
+  return `<div class="modal"><div class="win" role="alertdialog" aria-label="Leave the match?" style="max-width:440px">
+    <h2 style="font-size:24px">Leave the match?</h2>
+    <p style="margin-top:10px">You can’t rejoin this match. Your scores so far stay on the board, but you can’t win.${amDm ? ' You’re the DM right now, so this dungeon ends early and you get nothing for it.' : ''}</p>
+    <div class="row" style="margin-top:14px"><button class="pbtn" data-act="leaveNo">Stay</button><button class="pbtn gold" data-act="leaveYes">Leave</button></div>
+  </div></div>`;
 }
 
 /* ----- waiting room ----- */
@@ -672,7 +907,7 @@ function spreadGold() {
 function renderDmWatch() {
   const d = D();
   const waiting = d.advs.filter((a) => !a.ready).map((a) => esc(pname(a.id)));
-  return `<div class="win"><p style="margin:0">${waiting.length ? `Still choosing: ${waiting.join(', ')}.` : 'Everyone has chosen.'} Your traps are shown above the doors. Only you and the ghosts can see them.</p></div>${sayBox('dm', true)}`;
+  return `<div class="win"><p style="margin:0">${waiting.length ? `Still choosing: ${waiting.join(', ')}.` : 'Everyone has chosen.'} Your traps show on the doors. Only you and the ghosts can see them.</p></div>`;
 }
 
 /* ----- ghost ----- */
@@ -686,7 +921,7 @@ function renderGhost() {
     <p class="muted">If a trap hurts them this round, you steal ${Math.round(c.HAUNT_STEAL * 100)}% of their gold. Nobody can see who you haunt. You can talk, and you can lie.</p>
     <div class="seg">${btns}<button class="pbtn ${d.ghostDone && !d.myHaunt ? 'on' : ''}" data-act="haunt" data-id="">Nobody</button></div>
     ${d.ghostDone ? `<div class="note">${d.myHaunt ? `Haunting ${esc(pname(d.myHaunt))}.` : 'Haunting nobody.'} You can change this until time runs out.</div>` : ''}
-  </div>${sayBox('ghost', false)}`;
+  </div>`;
 }
 
 /* ----- adventurer ----- */
@@ -707,8 +942,7 @@ function renderAdventurer() {
   if (mine.inv.lock > 0) items.push(`<button class="pbtn ${a.lock ? 'on' : ''}" data-act="tog" data-v="lock">Lock (${mine.inv.lock})<span class="sub">All the gold, ×${c.LOCK_MULT} damage</span></button>`);
   if (mine.inv.charm > 0) items.push(`<label class="item">Charm (${mine.inv.charm})<select data-change="charm"><option value="">Don’t use</option>${EL.map((e) => `<option value="${e}" ${a.charm === e ? 'selected' : ''}>Resist ${cap(e)}</option>`).join('')}</select></label>`);
   if (mine.inv.shove > 0) items.push(`<label class="item">Shove (${mine.inv.shove})<select data-change="shove"><option value="">Don’t use</option>${others.map((o) => `<option value="${o.id}" ${a.shove === o.id ? 'selected' : ''}>Shove ${esc(pname(o.id))}</option>`).join('')}</select></label>`);
-  const lensFor = (i) => mine.lens.find((x) => x.door === i);
-  const lens = mine.inv.lens > 0 ? `<div class="win"><div class="win-title">Lens (${mine.inv.lens}) <span class="muted">Look behind one door. Only you see it.</span></div><div class="seg">${d.doors.map((_, i) => `<button class="pbtn sm" data-act="lens" data-i="${i}" ${lensFor(i) ? 'disabled' : ''}>Door ${ROMAN[i]}</button>`).join('')}</div></div>` : '';
+
   const act = mine.action;
   let locked = '';
   if (act) {
@@ -721,11 +955,11 @@ function renderAdventurer() {
   const warnLine = sel ? elementWarning(sel.clue, mine.affinity) : '';
   return `<div class="win">
       ${steps([
-        { text: sel ? `Door ${ROMAN[a.door]}` : 'Tap a door above', done: !!sel },
+        { text: sel ? `Door ${ROMAN[a.door]}` : 'Pick a door', done: !!sel },
         { text: `${VERB[a.approach]}${sel ? '' : ' (pick how)'}`, done: !!sel && !!act },
         { text: act ? 'Locked in' : 'Lock in', done: !!act },
       ])}
-      <div class="win-title">${sel ? `Door ${ROMAN[a.door]} <span class="muted"><span class="gold">${sel.gold} gold</span>. <span class="el-${sel.clue}">${CLUE[sel.clue]}</span></span>` : 'Tap a door above'}</div>
+      <div class="win-title">${sel ? `Door ${ROMAN[a.door]} <span class="muted"><span class="gold">${sel.gold} gold</span>. ${sel.clue ? `<span class="el-${sel.clue}">${CLUE[sel.clue]}</span>` : 'Not scanned.'}</span>` : 'Pick a door above'}</div>
       ${warnLine ? `<p class="small" style="margin:-4px 0 12px">${warnLine}</p>` : ''}
       <div class="seg">${approaches}</div>
       ${items.length ? `<div class="win-title" style="margin-top:14px">Items</div><div class="seg">${items.join('')}</div>` : ''}
@@ -734,11 +968,41 @@ function renderAdventurer() {
         <button class="pbtn gold" data-act="lockIn" ${sel ? '' : 'disabled'}>${sel ? `${VERB[a.approach]} through door ${ROMAN[a.door]}` : 'Pick a door first'}</button>
         <button class="pbtn" data-act="rest">Rest by the fire<span class="sub">+${c.REST_HEAL} HP, no gold</span></button>
       </div>
-      <p class="muted small" style="margin:12px 0 0">Only the first ones in spring the trap. A room needs ${c.ROOM_BAGS} bags to empty; with more, the gold is split by bags. If time runs out before you lock in, you rest by the fire.</p>
-    </div>
-    ${lens}
-    ${sayBox('adventurer', false)}
-    ${renderShop()}`;
+      <p class="muted small" style="margin:12px 0 0">Only the first ones in spring the trap. A room needs ${c.ROOM_BAGS} bags to empty; with more, the gold is split by bags. If time runs out, the plan you’ve picked counts even if you didn’t lock it in. With no door picked, you rest.</p>
+    </div>`;
+}
+
+/* ----- the journal: a page per door, your marks, rumours, and the plan ----- */
+const MARK_NAMES = { safe: 'Safe?', trap: 'Trap?', liar: 'Liar?' };
+function renderJournal() {
+  const d = D();
+  const c = cfg();
+  const mine = d.mine;
+  const a = ui.adv;
+  const marks = ui.marks || {};
+  const touch = window.matchMedia('(pointer: coarse)').matches;
+  const scannedAny = Object.keys(mine.known || {}).length > 0;
+  const nudge = !scannedAny && mine.flasks > 0
+    ? `<div class="note" style="margin-top:0">You haven’t scanned a door yet. Walk up to one and ${touch ? 'tap' : 'press E for'} <b>Scan</b>. It uses one oil flask, and only you see what it shows.</div>` : '';
+  const oil = `<p class="small" style="margin:0 0 10px">${Sprites.icon('flask', 2)} Oil: <b>${mine.flasks}</b> of ${mine.flaskCap}. Each scan uses one flask, and you get ${mine.flasksPerRound} more each round.${mine.inv.lens ? ` You have ${mine.inv.lens === 1 ? 'a Lens' : mine.inv.lens + ' Lenses'}: turn it on before a scan to see the real trap.` : ''}</p>`;
+  const pages = d.doors.map((x, i) => {
+    const k = mine.known[i];
+    const chosen = a.door === i && !a.resting;
+    const clue = k
+      ? `${Sprites.icon(k.clue, 2)} Clue: <b class="el-${k.clue}">${SHORT[k.clue]}</b>${k.clue !== 'none' ? ` <span class="muted">(${cap(k.clue)})</span>` : ''}${elementTag(k.clue, mine.affinity)}`
+      : '<span class="muted">Not scanned</span>';
+    const lens = k && k.lens
+      ? `<div class="j-line">${Sprites.icon('eye', 2)} Lens: <b>${k.lens.trap ? `${c.TRAPS[k.lens.trap.tier].name} ${cap(k.lens.trap.element)} trap` : 'no trap'}</b>${k.lens.illusion ? ' <span class="ttag spite">the clue is fake</span>' : ''}</div>` : '';
+    const rumours = ui.whispers.filter((w) => w.from !== S.me && doorIn(w.text) === i).slice(0, 3)
+      .map((w) => `<div class="j-rumour">${esc(pname(w.from))}: “${esc(w.text)}”</div>`).join('');
+    const mk = Object.entries(MARK_NAMES).map(([m, label]) => `<button class="mark-btn m-${m} ${marks[i] === m ? 'on' : ''}" data-act="mark" data-i="${i}" data-v="${m}" aria-pressed="${marks[i] === m}">${label}</button>`).join('');
+    return `<div class="j-door ${chosen ? 'chosen' : ''}">
+      <div class="j-head"><b>Door ${ROMAN[i]}</b><span class="gold">${Sprites.icon('coin', 2)} ${x.gold}</span>${marks[i] ? `<span class="mark-chip m-${marks[i]}">${MARK_NAMES[marks[i]]}</span>` : ''}</div>
+      <div class="j-line">${clue}</div>${lens}${rumours}
+      <div class="j-actions">${mk}<button class="pbtn sm ${chosen ? 'on' : ''}" data-act="pickDoor" data-i="${i}">${chosen ? 'Chosen' : 'Choose'}</button></div>
+    </div>`;
+  }).join('');
+  return `${nudge}${oil}<div class="j-doors">${pages}</div><h4 class="j-sub">Your plan</h4>${renderAdventurer()}`;
 }
 
 /* ----- results ----- */
@@ -772,11 +1036,12 @@ function renderDungeonEnd() {
   const N = d.advIds.length;
   const rows = Object.entries(sc).sort((a, b) => b[1].score - a[1].score).map(([id, s]) => `
     <tr><td>${esc(pname(id))}</td>
-    <td>${s.role === 'dm' ? 'DM' : s.alive ? 'Adventurer' : '<span class="ghostname">Ghost</span>'}</td>
+    <td>${s.role === 'dm' ? 'DM' : s.alive ? 'Adventurer' : '<span class="ghostname">Ghost</span>'}${s.left ? ' <span class="tag">Left</span>' : ''}</td>
     <td class="num">${s.held}</td>
     <td class="num"><b>${s.score.toFixed(1)}</b></td></tr>`).join('');
   const lastD = S.match.dIndex + 1 >= S.match.total;
   return `${renderAwards(d)}<div class="win">
+    ${d.endedEarly ? `<div class="note warn" style="margin-top:0">${d.endedEarly === 'dmLeft' ? 'The DM left, so this dungeon ended early. Scores count only the gold that was in play.' : 'Too few players are left, so this dungeon ended early.'}</div>` : ''}
     <div class="win-title">Dungeon scores <span class="muted">Pot ${d.P} gold</span></div>
     <div class="tablewrap"><table class="scores">
       <thead><tr><th>Player</th><th>Role</th><th class="num">Gold</th><th class="num">Score</th></tr></thead>
@@ -788,7 +1053,7 @@ function renderDungeonEnd() {
   <div class="win"><div class="win-title">Match log <span class="muted">Every round so far, for tuning the game</span></div>${logButtons()}</div>`;
 }
 
-const AWARD_ICON = { greediest: 'coin', canary: 'heart', spiteful: 'lock', daredevil: 'fire', coward: 'zz', untouchable: 'crown', trapmaster: 'skull' };
+const AWARD_ICON = { greediest: 'coin', canary: 'heart', spiteful: 'lock', daredevil: 'fire', coward: 'zz', untouchable: 'crown', trapmaster: 'skull', scout: 'eye' };
 function renderAwards(d) {
   if (!d.awards || !d.awards.length) return '';
   const cards = d.awards.map((w) => {
@@ -821,14 +1086,17 @@ function renderMatchEnd() {
   const m = S.match;
   const sorted = [...m.dmOrder].sort((a, b) => m.totals[b] - m.totals[a]);
   const top = m.totals[sorted[0]];
-  const winners = sorted.filter((id) => m.totals[id] === top).map((id) => esc(pname(id)));
+  const leftIds = S.players.filter((p) => p.left).map((p) => p.id);
+  const stayers = sorted.filter((id) => !leftIds.includes(id));
+  const topStay = stayers.length ? m.totals[stayers[0]] : top;
+  const winners = stayers.filter((id) => m.totals[id] === topStay).map((id) => esc(pname(id)));
   const names = winners.length > 1 ? winners.slice(0, -1).join(', ') + ' and ' + winners[winners.length - 1] : winners[0];
-  const place = (id) => 1 + sorted.filter((x) => m.totals[x] > m.totals[id]).length;
+  const place = (id) => 1 + stayers.filter((x) => m.totals[x] > m.totals[id]).length;
   return `<div class="win">
     <div class="winner">${names} ${winners.length > 1 ? 'share the hoard' : 'takes the hoard'}</div>
     <div class="tablewrap"><table class="scores">
       <thead><tr><th>Rank</th><th>Player</th><th class="num">Total</th></tr></thead>
-      <tbody>${sorted.map((id) => `<tr><td>${place(id)}</td><td>${esc(pname(id))}</td><td class="num"><b>${m.totals[id].toFixed(1)}</b></td></tr>`).join('')}</tbody>
+      <tbody>${sorted.map((id) => `<tr><td>${leftIds.includes(id) ? '–' : place(id)}</td><td>${esc(pname(id))}${leftIds.includes(id) ? ' <span class="tag">Left</span>' : ''}</td><td class="num"><b>${m.totals[id].toFixed(1)}</b></td></tr>`).join('')}</tbody>
     </table></div>
     <div style="margin-top:14px">${isHost() ? '<button class="pbtn gold" data-act="toLobby">Back to the lobby</button>' : `<span class="muted">${esc(pname(S.hostId))} can take everyone back to the lobby.</span>`}</div>
   </div>
@@ -843,7 +1111,8 @@ function renderRules() {
     <h3>Each round</h3>
     <ul>
       <li>The DM hides gold behind the doors and buys traps with mana, their trap budget. The DM starts each dungeon with 8 mana banked, gets more every round, and keeps what they don’t spend. Every trap has an element.</li>
-      <li>Adventurers see each door’s gold and a clue. A trapped door shows its real element; an empty door shows nothing. The DM can pay for an illusion to fake either.</li>
+      <li>Adventurers see each door’s gold. Its clue is hidden: walk up to a door and scan it with your lantern (one oil flask, 3 seconds, and only you see the result). A trapped door’s clue is its real element; an empty door is silent. The DM can pay for an illusion to fake either, and illusions fool scans too.</li>
+      <li>You get oil each round (one fewer flask than there are doors) and can carry as many flasks as there are doors. The shopkeeper sells more. A Lens makes your next scan show the real trap and its strength.</li>
       <li>Each adventurer secretly picks a door and how to go in, or rests by the fire (+10 HP). Then the doors open.</li>
     </ul>
     <h3>Going in</h3>
@@ -857,7 +1126,7 @@ function renderRules() {
     <h3>Items (single use; the shop is open while the DM sets traps and while you choose)</h3>
     <ul>
       <li>Potion: +40 HP. Armour: half damage this round. Charm: resist one element this round.</li>
-      <li>Lens: see the real trap behind one door, only you.</li>
+      <li>Oil flask: one more scan. Lens: your next scan shows the real trap, even through an illusion.</li>
       <li>Lock: you enter alone and take all the gold; anyone else on that door is locked out. You take ×2.5 damage.</li>
       <li>Shove: if your target picks your door, they spring the trap alone at ×1.5. Two shoves on each other: both go in.</li>
     </ul>
@@ -961,6 +1230,7 @@ function shopLine(e) {
   if (e.bought) return `${e.player} bought ${e.bought} (${e.cost})`;
   if (e.drank) return `${e.player} drank a potion (${e.hpBefore} to ${e.hpAfter} HP)`;
   if (e.usedLens) return `${e.player} used a lens on door ${e.usedLens} and saw ${e.saw}`;
+  if (e.scanned) return `${e.player} scanned door ${e.scanned}${e.lens ? ' with a Lens' : ''} and saw ${e.saw}`;
   return '';
 }
 
@@ -981,6 +1251,8 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   if (e.key === 'Escape' && ui.rules) { ui.rules = false; render(); }
+  else if (e.key === 'Escape' && ui.confirmLeave) { ui.confirmLeave = false; render(); }
+  else if (e.key === 'Escape' && ui.sheet && !Tutorial.isOpen()) { ui.sheet = null; render(); }
   if (Tutorial.isOpen()) {
     if (e.key === 'Escape') { Tutorial.handle('tutClose'); render(); }
     if (e.key === 'ArrowRight') { Tutorial.handle('tutNext'); render(); }
@@ -991,10 +1263,10 @@ document.addEventListener('keydown', (e) => {
 function sendWhisper(to, i, door) {
   socket.emit('whisper', { to, i, door }, (r) => {
     if (!r || r.error) return toast((r && r.error) || 'Could not whisper.');
-    Scene.say(S.me, r.text, 'whisper');
+    Room.say(S.me, r.text, 'whisper');
     ui.whispers.unshift({ from: S.me, to, text: r.text });
     Sound.play('whisper');
-    renderPanel();
+    renderSheetOnly();
   });
 }
 
@@ -1067,8 +1339,8 @@ document.addEventListener('change', (e) => {
   if (k === 'rounds') socket.emit('settings', { rounds: Number(v) });
   if (k === 'pace') socket.emit('settings', { pace: v });
   if (k === 'dmIll') { ui.dm[Number(e.target.dataset.i)].illusion = v; sendDraft(); render(); }
-  if (k === 'charm') { ui.adv.charm = v; render(); }
-  if (k === 'shove') { ui.adv.shove = v; render(); }
+  if (k === 'charm') { ui.adv.charm = v; sendPlanDraft(); render(); }
+  if (k === 'shove') { ui.adv.shove = v; sendPlanDraft(); render(); }
 });
 document.addEventListener('click', (e) => {
   const t = e.target.closest('[data-act]');
@@ -1097,7 +1369,7 @@ document.addEventListener('click', (e) => {
     case 'setupReady': socket.emit('setupReady'); Sound.play('lockIn'); break;
     case 'buy': socket.emit('buy', { item: t.dataset.item }, (r) => { ack(r); if (r && r.ok) Sound.play('coins', 2); }); break;
     case 'drink': socket.emit('drink', null, (r) => { ack(r); if (r && r.ok) Sound.play('heal'); }); break;
-    case 'lens': socket.emit('lens', { door: i }); break;
+
     case 'dmGold': {
       const delta = Number(v);
       if (delta > 0 && goldLeft() < delta) return toast('All the gold is already hidden.');
@@ -1112,29 +1384,46 @@ document.addEventListener('click', (e) => {
       if (Date.now() < ui.sayUntil) break;
       ui.sayUntil = Date.now() + 2600;
       socket.emit('emote', { i });
-      renderPanel();
-      setTimeout(renderPanel, 2700);
+      renderSheetOnly();
+      setTimeout(renderSheetOnly, 2700);
       break;
     }
-    case 'whisperTo': ui.whisperTo = t.dataset.id; renderPanel(); break;
-    case 'whisperCancel': ui.whisperPick = null; renderPanel(); break;
+    case 'whisperTo': ui.whisperTo = t.dataset.id; renderSheetOnly(); break;
+    case 'whisperCancel': ui.whisperPick = null; renderSheetOnly(); break;
     case 'whisper': {
       const text = cfg().MESSAGES.huddle[i] || '';
-      if (text.includes('{door}')) { ui.whisperPick = i; ui.whisperTo = t.dataset.id; renderPanel(); break; }
+      if (text.includes('{door}')) { ui.whisperPick = i; ui.whisperTo = t.dataset.id; renderSheetOnly(); break; }
       sendWhisper(t.dataset.id, i, null);
       break;
     }
-    case 'whisperDoor': sendWhisper(ui.whisperTo || nearbyIds()[0], ui.whisperPick, i); ui.whisperPick = null; break;
+    case 'whisperDoor': sendWhisper(ui.whisperTo || Room.nearPeople()[0], ui.whisperPick, i); ui.whisperPick = null; break;
     case 'dmSubmit': socket.emit('dmSubmit', draftForServer(), (r) => { ack(r); if (r && r.ok) Sound.play('lockIn'); }); break;
-    case 'pickDoor': ui.adv.door = i; ui.adv.resting = false; render(); break;
-    case 'approach': ui.adv.approach = v; render(); break;
-    case 'tog': ui.adv[v] = !ui.adv[v]; render(); break;
+    case 'pickDoor': ui.adv.door = i; ui.adv.resting = false; sendPlanDraft(); render(); break;
+    case 'approach': ui.adv.approach = v; sendPlanDraft(); render(); break;
+    case 'tog': ui.adv[v] = !ui.adv[v]; sendPlanDraft(); render(); break;
+    case 'sheet': ui.sheet = ui.sheet === v ? null : v; render(); break;
+    case 'sheetClose': ui.sheet = null; render(); break;
+    case 'roomAct': roomAction(); break;
+    case 'scanDoor': startScan(i); break;
+    case 'chooseDoor': chooseDoor(i); break;
+    case 'scanStop': socket.emit('scanCancel'); break;
+    case 'lensToggle': ui.useLens = !ui.useLens; renderHudOnly(); break;
+    case 'mark': ui.marks[i] = ui.marks[i] === v ? null : v; render(); break;
+    case 'anim': store.set('gs_anim', animOff() ? 'on' : 'off'); applyAnim(); render(); break;
+    case 'fullscreen': toggleFullscreen(); break;
+    case 'leaveAsk': ui.confirmLeave = true; render(); break;
+    case 'leaveNo': ui.confirmLeave = false; render(); break;
+    case 'leaveYes':
+      ui.confirmLeave = false; ui.sheet = null;
+      socket.emit('leave'); store.del('gs_code'); S = null; render();
+      toast('You left the match.');
+      break;
     case 'lockIn': {
       const a = ui.adv;
       socket.emit('action', { type: 'door', door: a.door, approach: a.approach, armour: a.armour, lock: a.lock, charm: a.charm || null, shove: a.shove || null }, (r) => { ack(r); if (r && r.ok) Sound.play('lockIn'); });
       break;
     }
-    case 'rest': ui.adv.door = null; ui.adv.resting = true; socket.emit('action', { type: 'rest' }, (r) => { ack(r); if (r && r.ok) Sound.play('lockIn'); }); render(); break;
+    case 'rest': restNow(); break;
     case 'haunt': socket.emit('haunt', { target: t.dataset.id || null }); Sound.play('ghost'); break;
     case 'sound': Sound.setMuted(!Sound.isMuted()); if (!Sound.isMuted()) { Sound.unlock(); Sound.play('click'); } render(); break;
     case 'log': downloadLog(v); break;
