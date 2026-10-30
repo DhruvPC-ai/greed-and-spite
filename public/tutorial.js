@@ -32,6 +32,18 @@ const Tutorial = (() => {
         </div>`,
     },
     {
+      key: 'screen',
+      title: 'Your screen',
+      text: 'The party is on the left, the room in the middle, and your screens on the right. Switch screens with the icons at the far right: Journal, Shop, Talk, History and Menu. A red dot means something needs you.',
+      art: () => `
+        <div class="tlayout">
+          <div class="tl-left"><span>Party</span><i></i><i></i><i></i><em>Scores</em></div>
+          <div class="tl-mid"><span>The room</span></div>
+          <div class="tl-panel"><span>Your screen</span><p></p><p></p><p></p></div>
+          <div class="tl-rail">${I('book', 2)}${I('bag', 2)}${I('bubble', 2)}${I('scroll', 2)}${I('gear', 2)}</div>
+        </div>`,
+    },
+    {
       key: 'doors',
       title: 'Doors and clues',
       text: 'Every door shows its gold. Its clue, the element of the trap behind it, is hidden until you scan the door. A silent door looks safe, but the DM can fake any clue.',
@@ -76,7 +88,7 @@ const Tutorial = (() => {
     {
       key: 'first',
       title: 'The first ones in spring the trap',
-      text: 'Only the fastest players into a room get hurt. Anyone slower behind them is safe and still grabs a share. Let someone else go first.',
+      text: 'Only the fastest players into a room get hurt. Anyone slower behind them is safe and still grabs a share. After the doors open, the next round starts on its own; History keeps every round’s story.',
       art: () => `
         <div class="trow end">
           ${door({ open: true, trap: 'fire' })}
@@ -108,7 +120,7 @@ const Tutorial = (() => {
     {
       key: 'shop',
       title: 'While you wait',
-      text: 'Walk around with the arrow keys, or tap where to go. Walk up to the shopkeeper to shop (he sells oil too), and up to anyone to whisper. Your journal keeps what you learned. Spent gold no longer counts toward your score.',
+      text: 'Walk around with the arrow keys, or tap where to go. Walk up to the shopkeeper to shop (he sells oil too), and up to anyone to whisper. Your Journal keeps everything you learn. Spent gold no longer counts toward your score.',
       art: () => `
         <div class="trow end">
           <div class="tcol tight"><div class="tfire">${Sprites.flame(4)}<div class="tlogs"></div></div><span class="tt-sit">${Sprites.sitting(2, 'air', 3)}</span><span class="tfloat heal">+10 HP</span></div>
@@ -134,15 +146,15 @@ const Tutorial = (() => {
     {
       key: 'dm',
       title: 'When you’re the DM',
-      text: 'Drag gold, traps and fake clues onto the doors. Traps cost mana, your trap budget: you get more every round, and what you don’t spend carries over. Gold nobody takes is yours, so big gold makes great bait.',
+      text: 'Tap a door in the room, then use your Traps screen: drag the gold bar to share out the gold, tap a trap card to place it, and add a fake clue if you want to lie. Mana is your trap budget; unspent mana carries over. Gold nobody takes is yours.',
       art: () => `
-        <div class="trow end">
-          <div class="tcol tight">
-            <div class="tmana">${I('mana', 4)}<b>18 mana</b><span>this round</span></div>
-            ${tag(`Minor trap: 8`)}${tag(`Major trap: 14`)}${tag(`Deadly trap: 20`)}${tag(`Fake clue: 6`, 'spite')}
+        <div class="tcol tight" style="width:100%;max-width:340px">
+          <div class="tmana">${I('mana', 3)}<b>18 mana</b><span>your trap budget</span></div>
+          <div class="tgoldbar"><span style="flex:30">I: 30</span><i></i><span style="flex:20">II: 20</span><i></i><span style="flex:10">III: 10</span></div>
+          <div class="tcol tight" style="flex-direction:row;gap:6px">
+            ${[['Minor', '8'], ['Major', '14'], ['Deadly', '20']].map(([n, c]) => `<div class="ttcard"><b>${n}</b>${I('fire', 2)}<span>${I('mana', 1)} ${c}</span></div>`).join('')}
           </div>
-          ${door({ gold: 70, clue: 'none', label: 'Silent', num: 'II' })}
-          <div class="tcol tight">${tag('Big gold, no clue…', 'gold')}${tag('Trap or bluff?', 'muted')}</div>
+          ${tag('Fake clue: make a door show anything', 'spite')}
         </div>`,
     },
   ];

@@ -23,7 +23,7 @@ const C = {
   REST_HEAL: 10,
 
   // phase lengths in seconds at normal pace; the host picks a pace in the lobby
-  TIME: { setup: 60, dm: 75, adv: 45, results: 35 },
+  TIME: { setup: 60, dm: 75, adv: 45, results: 75, dungeonEnd: 60 },  // results and dungeonEnd end sooner once everyone is ready
   PACE: { relaxed: 1.5, normal: 1, fast: 0.7 },
   DEFAULT_PACE: 'normal',
 
@@ -190,6 +190,7 @@ function phaseTime(room, key) {
   return Math.round(C.TIME[key] * (C.PACE[room.settings.pace] || 1));
 }
 function setPhase(room, phase, secs, onExpire) {
+  room.ready = new Set();
   if (secs) secs = secs * TIME_SCALE;
   if (room.timer) clearTimeout(room.timer);
   room.timer = null;
@@ -818,6 +819,7 @@ function computeAwards(room, d) {
 }
 
 function afterResults(room) {
+  if (room.phase !== 'results') return;
   const d = room.match.dungeon;
   if (d.round >= d.rounds || livingIds(d).length === 0) endDungeon(room);
   else startRound(room);
@@ -856,7 +858,7 @@ function endDungeon(room, early) {
   m.log.totals = Object.fromEntries(Object.entries(m.totals).map(([id, v]) => [nameOf(room, id), v]));
   if (early) L.endedEarly = early === 'dmLeft' ? 'The DM left' : 'Too few players';
   if (activePlayers(room).length < C.MIN_PLAYERS) return endMatch(room);
-  setPhase(room, 'dungeonEnd', null);
+  setPhase(room, 'dungeonEnd', phaseTime(room, 'dungeonEnd'), () => nextDungeon(room));
   broadcast(room);
 }
 
@@ -869,11 +871,21 @@ function endMatch(room) {
 }
 // move on to the next dungeon whose DM is still here
 function nextDungeon(room) {
+  if (room.phase !== 'dungeonEnd') return;
   const m = room.match;
   do { m.dIndex++; } while (m.dIndex < m.dmOrder.length && room.players.find((p) => p.id === m.dmOrder[m.dIndex] && p.left));
   if (m.dIndex < m.dmOrder.length && activePlayers(room).length >= C.MIN_PLAYERS) startDungeon(room);
   else endMatch(room);
 }
+function checkReady(room) {
+  if (!['results', 'dungeonEnd'].includes(room.phase)) return;
+  const need = room.players.filter((p) => p.connected && !p.left);
+  if (need.length && need.every((p) => room.ready.has(p.id))) {
+    if (room.phase === 'results') afterResults(room);
+    else nextDungeon(room);
+  }
+}
+
 function playerLeft(room, player) {
   player.left = true;
   player.connected = false;
@@ -921,6 +933,7 @@ function viewFor(room, p) {
     players: room.players.map((x) => ({ id: x.id, name: x.name, connected: x.connected, guide: !!x.guide, left: !!x.left })),
     match: null,
     hasLastLog: !!room.lastLog,
+    ready: room.ready ? [...room.ready] : [],
   };
   const m = room.match;
   if (!m) return v;
@@ -950,6 +963,14 @@ function viewFor(room, p) {
     scores: d.scores,
     awards: d.awards,
     endedEarly: d.endedEarly || null,
+    stories: (d.history || []).map((r) => ({
+      round: r.round,
+      dmTimedOut: !!r.dmTimedOut,
+      doors: r.doors.map((x) => ({ index: x.index, lines: x.lines })),
+      rests: r.rests.map((x) => ({ id: x.id, healed: x.healed, auto: !!x.auto })),
+      haunts: r.haunts,
+      deaths: r.deaths,
+    })),
   };
   if (role === 'dm') {
     dv.dm = {
@@ -1284,6 +1305,14 @@ io.on('connection', (socket) => {
     reply(cb, { ok: true, text });
   });
 
+  socket.on('ready', () => {
+    const { room, player } = ctx(socket);
+    if (!room || !player || !['results', 'dungeonEnd'].includes(room.phase)) return;
+    room.ready.add(player.id);
+    broadcast(room);
+    checkReady(room);
+  });
+
   socket.on('guideDone', () => {
     const { room, player } = ctx(socket);
     if (!room || !player) return;
@@ -1313,8 +1342,9 @@ io.on('connection', (socket) => {
     broadcast(room);
   });
 
-  socket.on('disconnect', () => {
+  socket.on('disconnect', (reason) => {
     const { room, player } = ctx(socket);
+    if (player) console.log(`${player.name} disconnected (${reason})`);
     if (!room || !player || player.socketId !== socket.id) return;
     player.connected = false;
     player.socketId = null;
@@ -1326,6 +1356,7 @@ io.on('connection', (socket) => {
     broadcast(room);
     if (room.phase === 'setup') checkSetupDone(room);
     if (room.phase === 'adv') checkAdvDone(room);
+    checkReady(room);
   });
 });
 

@@ -192,6 +192,11 @@ const Sprites = (() => {
     bag: [['...KK...', '..K..K..', '...KK...', '..GGGG..', '.GGYYGG.', 'GGYGGYGG', 'GGGGGGGG', '.GGGGGG.'], { K: '#5a3d1e', G: '#9b7440', Y: '#f5c542' }],
     pointer: [['..WWWW..', '..WWWW..', '..WWWW..', 'WWWWWWWW', '.WWWWWW.', '..WWWW..', '...WW...', '........'], { W: '#f2c14e' }],
     flask: [['...KK...', '...WW...', '..WOOW..', '.WOOOOW.', '.WOYYOW.', '.WOOOOW.', '..WWWW..', '........'], { W: '#cfd8e6', O: '#d98a2b', Y: '#f5c542', K: '#6b4423' }],
+    book: [['.KKKKKKK', 'KBBBBBBK', 'KBYYBBBK', 'KBBBBBBK', 'KBBBBYBK', 'KBBBBBBK', 'KWWWWWWK', '.KKKKKKK'], { B: '#7a3b2a', Y: '#e0b44a', W: '#efe6cf', K: '#2a160f' }],
+    bubble: [['.WWWWWW.', 'WWWWWWWW', 'WWKWKWKW', 'WWWWWWWW', '.WWWWWW.', '..WW....', '.W......', '........'], { W: '#efe6cf', K: '#1d1620' }],
+    scroll: [['BB.....B', 'BPPPPPPB', '.PKKKKP.', '.PPPPPP.', '.PKKKP..', '.PPPPPP.', 'BPPPPPPB', 'B.....BB'], { P: '#e9d7a8', K: '#7a6a4a', B: '#9b7440' }],
+    gear: [['...GG...', '.G.GG.G.', '..GGGG..', 'GGG..GGG', 'GGG..GGG', '..GGGG..', '.G.GG.G.', '...GG...'], { G: '#a8b0c4' }],
+    spikes: [['..W...W.', '..W...W.', '.WGW.WGW', '.WGW.WGW', 'WGGGWGGG', 'WGGGWGGG', 'KKKKKKKK', 'KKKKKKKK'], { W: '#e3e8f2', G: '#9aa3b5', K: '#4a3418' }],
     erase: [['R......R', '.R....R.', '..R..R..', '...RR...', '...RR...', '..R..R..', '.R....R.', 'R......R'], { R: '#e0524a' }],
     zz: [['ZZZZ....', '..Z.....', '.Z......', 'ZZZZ.ZZZ', '......Z.', '.....ZZZ', '........', '........'], { Z: '#c3b6ff' }],
   };

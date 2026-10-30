@@ -33,7 +33,7 @@ const Room = (() => {
   let merchantEl = null;
   let scanning = {};          // who is scanning which door right now
   let myScan = false;
-  const on = { send: null, near: null, action: null, cancelScan: null };
+  const on = { send: null, near: null, action: null, cancelScan: null, doorTap: null };
   const MARKS = { safe: 'Safe?', trap: 'Trap?', liar: 'Liar?' };
 
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -52,18 +52,14 @@ const Room = (() => {
     root.appendChild(inner);
     inner.addEventListener('pointerdown', onPointer);
     new ResizeObserver(fit).observe(document.body);
+    requestAnimationFrame(() => { const st = document.getElementById('stage'); if (st) new ResizeObserver(fit).observe(st); });
     window.addEventListener('resize', fit);
     requestAnimationFrame(frame);
   }
   function fit() {
     if (!root || !root.parentElement) return;
-    const host = root.parentElement;
-    const bar = document.getElementById('bar');
-    const hud = document.getElementById('hud');
-    const title = document.getElementById('stage-title');
-    const compact = window.matchMedia('(max-height: 540px) and (orientation: landscape)').matches;
-    const spare = window.innerHeight - (bar ? bar.offsetHeight : 0) - (title ? title.offsetHeight : 0) - (compact ? 0 : (hud ? hud.offsetHeight : 0)) - (compact ? 18 : 40);
-    const size = Math.max(220, Math.min(host.clientWidth, spare, 720));
+    const stage = document.getElementById('stage') || root.parentElement;
+    const size = Math.max(180, Math.floor(Math.min(stage.clientWidth, stage.clientHeight) - 8));
     root.style.width = size + 'px';
     root.style.height = size + 'px';
     inner.style.transform = `scale(${size / RW})`;
@@ -117,7 +113,11 @@ const Room = (() => {
         <div class="sd-fx"></div>
         <div class="rd-mark" hidden></div>`;
       inner.appendChild(el);
-      doors.push({ el, i, gold: el.querySelector('.rd-plaque b'), clue: el.querySelector('.rd-clue'), warn: el.querySelector('.rd-warn'), seen: el.querySelector('.rd-seen'), fx: el.querySelector('.sd-fx'), mark: el.querySelector('.rd-mark'), sig: '' });
+      const fxEl = document.createElement('div');
+      fxEl.className = 'r-trapfx';
+      fxEl.style.left = doorX(i, n) + 'px';
+      inner.appendChild(fxEl);
+      doors.push({ el, i, trapfx: fxEl, trapSig: '', gold: el.querySelector('.rd-plaque b'), clue: el.querySelector('.rd-clue'), warn: el.querySelector('.rd-warn'), seen: el.querySelector('.rd-seen'), fx: el.querySelector('.sd-fx'), mark: el.querySelector('.rd-mark'), sig: '' });
     }
     d.advs.forEach((a) => { if (!a.left) addActor(a); });
     scanning = Object.assign({}, d.scans || {});
@@ -131,7 +131,7 @@ const Room = (() => {
     const p = toPx((d.pos && d.pos[a.id]) || { x: 0.5, y: 0.94 });
     const el = document.createElement('div');
     el.className = 'r-actor';
-    el.innerHTML = `<div class="say" hidden></div><div class="bubble" hidden>!</div><div class="rsprite sprite"></div><div class="nameplate"><span>${esc(nameOf(a.id))}</span><i class="mini-hp"><b></b></i></div>`;
+    el.innerHTML = `<div class="say" hidden></div><div class="bubble" hidden>!</div><div class="r-weak" hidden></div><div class="rsprite sprite"></div><div class="nameplate"><span>${esc(nameOf(a.id))}</span><i class="mini-hp"><b></b></i></div>`;
     inner.appendChild(el);
     const beam = document.createElement('div');
     beam.className = 'r-beam';
@@ -141,7 +141,7 @@ const Room = (() => {
       id: a.id, el, x: p.x, y: p.y, tx: p.x, ty: p.y, dir: (d.pos && d.pos[a.id] && d.pos[a.id].d) || 'up', tdir: null,
       walking: false, ghost: !a.alive, element: a.affinity, drawn: '', placed: '',
       sprite: el.querySelector('.rsprite'), say: el.querySelector('.say'), bubble: el.querySelector('.bubble'), hp: el.querySelector('.mini-hp'),
-      beam,
+      beam, weak: el.querySelector('.r-weak'), weakSig: '',
     };
     actors[a.id] = ac;
     if (a.id === S.me) mine = ac;
@@ -186,10 +186,19 @@ const Room = (() => {
     scanning = Object.assign({}, phase === 'adv' ? d.scans || {} : {});
     doors.forEach((door, i) => {
       let face = { unknown: true }, seen = null, warn = null, selected = false;
-      if (phase === 'adv' && d.doors) {
+      let trapShown = null;
+      if (role === 'dm' && phase === 'dm' && ui.dm && ui.dm[i]) {
+        // the DM's own dungeon, previewed live as they build it
+        const x = ui.dm[i];
+        const clue = x.illusion !== 'honest' ? x.illusion : x.tier === 'none' ? 'none' : x.element;
+        face = { gold: x.gold, clue };
+        trapShown = x.tier === 'none' ? null : { tier: x.tier, element: x.element };
+        seen = { trap: trapShown, illusion: x.illusion !== 'honest' };
+        selected = ui.dmSel === i;
+      } else if (phase === 'adv' && d.doors) {
         face = { gold: d.doors[i].gold, clue: d.doors[i].clue };
         if (face.clue === null) face.hidden = true;
-        if (role === 'dm' && d.dm && d.dm.doors) seen = { trap: d.dm.doors[i].trap, illusion: d.dm.doors[i].illusion !== null };
+        if (role === 'dm' && d.dm && d.dm.doors) { seen = { trap: d.dm.doors[i].trap, illusion: d.dm.doors[i].illusion !== null }; trapShown = d.dm.doors[i].trap; }
         if (role === 'ghost' && d.sight) seen = { trap: d.sight[i].trap, illusion: d.sight[i].illusion !== null };
         if (role === 'adv') {
           const aff = d.mine.affinity;
@@ -198,6 +207,14 @@ const Room = (() => {
           if (k && k.lens) seen = { trap: k.lens.trap, illusion: k.lens.illusion, lens: true };
           selected = ui.adv && ui.adv.door === i && !ui.adv.resting;
         }
+      }
+      const tsig = trapShown ? trapShown.tier + trapShown.element : '';
+      if (tsig !== door.trapSig) {
+        door.trapSig = tsig;
+        door.trapfx.className = 'r-trapfx' + (trapShown ? ` t-${trapShown.element} tier-${trapShown.tier}` : '');
+        const count = trapShown ? { minor: 1, major: 2, deadly: 3 }[trapShown.tier] : 0;
+        door.trapfx.innerHTML = !trapShown ? '' : trapShown.element === 'fire' ? Sprites.flame(2).repeat(count)
+          : trapShown.element === 'earth' ? '<i></i>'.repeat(count + 1) : trapShown.element === 'air' ? Sprites.icon('air', 2).repeat(count) : '<b></b>';
       }
       const mark = role === 'adv' && phase === 'adv' && ui.marks ? ui.marks[i] || null : null;
       const lit = Object.values(scanning).includes(i);
@@ -234,6 +251,15 @@ const Room = (() => {
       ac.hp.firstElementChild.style.width = pct + '%';
       ac.hp.firstElementChild.className = pct <= 30 ? 'low' : pct <= 60 ? 'mid' : '';
       ac.bubble.hidden = !((phase === 'setup' || phase === 'adv') && a.ready && a.id !== S.me);
+      // the DM sees what hurts each adventurer most
+      const weakEl = role === 'dm' && a.alive && a.affinity ? S.config.WEAK_TO[a.affinity] : null;
+      if ((weakEl || '') !== ac.weakSig) {
+        ac.weakSig = weakEl || '';
+        ac.weak.hidden = !weakEl;
+        ac.weak.innerHTML = weakEl ? `${Sprites.icon(weakEl, 1)}<span>weak</span>` : '';
+        ac.weak.className = 'r-weak' + (weakEl ? ' el-' + weakEl : '');
+        ac.weak.title = weakEl ? `${nameOf(a.id)} is weak to ${weakEl}` : '';
+      }
       const p = d.pos && d.pos[a.id];
       if (p && ac !== mine) setTarget(ac, p);
       if (ac === mine && p && !wasMoving && !target && dist(ac, toPx(p)) > 40) { ac.x = toPx(p).x; ac.y = toPx(p).y; }
@@ -444,7 +470,14 @@ const Room = (() => {
     return { x: (e.clientX - r.left) / s, y: (e.clientY - r.top) / s };
   }
   function onPointer(e) {
-    if (!canWalk() || e.button > 0) return;
+    if (e.button > 0) return;
+    if (S && S.match && S.match.dungeon && S.match.dungeon.role === 'dm' && S.phase === 'dm') {
+      const p = roomPoint(e);
+      const nd = S.match.dungeon.doorsCount;
+      if (p.y < WALL + 34) for (let i = 0; i < nd; i++) if (Math.abs(p.x - doorX(i, nd)) < 30 && on.doorTap) return on.doorTap(i);
+      return;
+    }
+    if (!canWalk()) return;
     const pt = roomPoint(e);
     for (const a of Object.values(actors)) {
       if (a === mine) continue;
@@ -522,9 +555,18 @@ const Room = (() => {
     doors.forEach((d) => d.el.classList.toggle('lit', Object.values(scanning).includes(d.i)));
   }
   function setMyScan(v) { myScan = !!v; if (v) { target = null; path = []; } }
+  // stop where you are and tell the server exactly where that is, before anything that checks your position
+  function flushPos() {
+    if (!mine) return;
+    target = null;
+    path = [];
+    keysDown.clear();
+    send(performance.now());
+  }
   return {
-    mount, update, setActive, setPos, say, walkTo, fit, setScan, setMyScan,
+    mount, update, setActive, setPos, say, walkTo, fit, setScan, setMyScan, flushPos,
     onCancelScan: (fn) => { on.cancelScan = fn; },
+    onDoorTap: (fn) => { on.doorTap = fn; },
     onSend: (fn) => { on.send = fn; },
     onNear: (fn) => { on.near = fn; },
     onAction: (fn) => { on.action = fn; },

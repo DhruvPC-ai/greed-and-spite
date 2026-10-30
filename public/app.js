@@ -71,7 +71,15 @@ socket.on('state', (v) => {
   syncLocal();
   if (S.phase === 'lobby' && !store.get('gs_tut_seen') && !Tutorial.isOpen()) openTutorial(0);
   const sk = D() ? `${S.phase}:${S.match.dIndex}:${D().round}:${D().role}` : S.phase;
-  if (sk !== ui.sheetKey) { ui.sheetKey = sk; ui.sheet = defaultSheet(); ui.near = null; if (S.phase !== 'adv') { ScanView.close(); Room.setMyScan(false); } }
+  if (sk !== ui.sheetKey) {
+    ui.sheetKey = sk;
+    ui.sheet = defaultTab();
+    ui.near = null;
+    ui.readySent = false;
+    ui.readyAt = S.phase === 'dungeonEnd' ? Date.now() + SCORES_MS : null;
+    ui.revealGuard = S.phase === 'results' ? Date.now() + 30000 : 0;
+    if (S.phase !== 'adv') { ScanView.close(); Room.setMyScan(false); }
+  }
   const need = needsMe() ? `${S.phase}:${S.match.dIndex}:${D().round}` : null;
   if (need && need !== lastNeed) Sound.play('yourTurn');
   lastNeed = need;
@@ -99,8 +107,8 @@ function stillOwes() {
 // which view is on screen: the top-down room, or the side-view door hall
 function viewMode() {
   const d = D();
+  // the side-view hall is only for the reveal and the scores; everything else happens in the room
   if (!d || ['results', 'dungeonEnd', 'matchEnd'].includes(S.phase)) return 'hall';
-  if (S.phase === 'dm' && d.role === 'dm') return 'hall';
   return 'room';
 }
 socket.on('pos', ({ id, x, y, d: dir }) => {
@@ -130,7 +138,9 @@ Room.onSend((p) => {
   d.pos[S.me] = p;
   socket.emit('move', p);
 });
+Room.onDoorTap((i) => { ui.dmSel = i; Sound.play('click'); render(); });
 Room.onNear((n) => {
+  if (n && n.type === 'door' && S && S.phase === 'adv' && ui.page !== n.i) { ui.page = n.i; if (ui.sheet === 'journal') renderPanel(); }
   ui.near = n;
   if (viewMode() === 'room') renderHudOnly();
   if (ui.sheet === 'whisper') renderSheetOnly();
@@ -142,12 +152,13 @@ function roomAction() {
   if (n.type === 'shop') { openSheet('shop'); merchantTalk(); }
   else if (n.type === 'door') { if (scanState(n.i).ok) startScan(n.i); else chooseDoor(n.i); }
   else if (n.type === 'fire') restNow();
-  else if (n.type === 'person') { ui.whisperTo = n.id; ui.whisperPick = null; openSheet('whisper'); }
+  else if (n.type === 'person') { ui.whisperTo = n.id; ui.whisperPick = null; openSheet('talk'); }
 }
 function chooseDoor(i) {
   ui.adv.door = i;
   ui.adv.resting = false;
   sendPlanDraft();
+  ui.page = 'plan';
   openSheet('journal');
 }
 // can I scan this door right now? and what should the button say?
@@ -168,6 +179,7 @@ function scanState(i) {
 function startScan(i) {
   const st = scanState(i);
   if (!st.ok) return toast(st.label);
+  Room.flushPos();
   socket.emit('scanStart', { door: i, lens: !!st.lens }, (r) => {
     if (!r || r.error) return toast((r && r.error) || 'Could not scan.');
     ScanView.show(i, r.ms, !!st.lens);
@@ -271,10 +283,9 @@ function syncLocal() {
   const key = `${S.match.dIndex}-${d.round}`;
   if (d.role === 'dm' && S.phase === 'dm' && ui.dmKey !== key) {
     ui.dmKey = key;
-    ui.dm = Array.from({ length: d.doorsCount }, () => ({
-      gold: cfg().MIN_DOOR_GOLD, tier: 'none', element: 'fire', illusion: 'honest',
-    }));
-    ui.tool = null;
+    ui.dm = Array.from({ length: d.doorsCount }, () => ({ gold: 0, tier: 'none', element: 'fire', illusion: 'honest' }));
+    ui.dmSel = 0;
+    evenGold();
     sendDraft();
   }
   if (ui.advKey !== key) {
@@ -321,71 +332,100 @@ let tickAt = null;
    ============================================================ */
 function render() {
   const want = !S ? 'home' : S.phase === 'lobby' ? 'lobby' : 'game';
+  document.body.classList.toggle('in-game', want === 'game');
   if (want === 'home') { $app.innerHTML = renderHome(); screen = 'home'; }
   else if (want === 'lobby') { $app.innerHTML = renderLobby(); screen = 'lobby'; }
   else {
     if (screen !== 'game') {
       $app.innerHTML = `
         <header class="bar" id="bar"></header>
-        <div class="game">
-          <section>
+        <div class="layout">
+          <aside class="col-left" id="left"></aside>
+          <main class="col-mid">
             <div class="stage-title" id="stage-title"></div>
-            <div id="scene-slot"></div>
-            <div id="room-slot"></div>
+            <div class="stage" id="stage"><div id="scene-slot"></div><div id="room-slot"></div></div>
             <div id="hud"></div>
-            <div id="panel"></div>
-          </section>
-          <aside id="side"></aside>
-        </div>`;
+          </main>
+          <section class="col-panel" id="panel"></section>
+          <nav class="col-rail" id="rail" aria-label="Screens"></nav>
+        </div>
+        <div class="rotate" id="rotate"></div>`;
       screen = 'game';
       Scene.mount(document.getElementById('scene-slot'));
       Room.mount(document.getElementById('room-slot'));
     }
+    if (!tabsFor().includes(ui.sheet)) ui.sheet = defaultTab();
+    const inRoom = viewMode() === 'room';
     document.getElementById('bar').innerHTML = renderBar();
-    const dd = D();
-    const mode = viewMode();
-    const inRoom = mode === 'room';
+    document.documentElement.style.setProperty('--bar-h', document.getElementById('bar').offsetHeight + 'px');
     document.getElementById('scene-slot').hidden = inRoom;
     document.getElementById('room-slot').hidden = !inRoom;
-    document.getElementById('hud').hidden = !inRoom;
-    document.querySelector('.game').classList.toggle('room-mode', inRoom);
-    document.getElementById('hud').innerHTML = inRoom ? renderHud() : '';
-    Room.setActive(inRoom);
-    const sticky = dd && !inRoom && S.phase === 'dm' && dd.role === 'dm';
-    document.querySelector('.game').classList.toggle('sticky-scene', !!sticky);
-    document.documentElement.style.setProperty('--bar-h', document.getElementById('bar').offsetHeight + 'px');
-    const slot = document.getElementById('scene-slot');
-    document.documentElement.style.setProperty('--scene-h', (sticky && slot ? slot.offsetHeight : 0) + 'px');
+    document.querySelector('.layout').classList.toggle('room-mode', inRoom);
     document.getElementById('stage-title').innerHTML = renderTitle();
+    document.getElementById('hud').innerHTML = renderHud();
+    document.getElementById('left').innerHTML = renderLeft();
+    document.getElementById('rail').innerHTML = renderRail();
     renderPanel();
-    document.getElementById('side').innerHTML = renderSide();
-    if (inRoom) Room.update(S, ui); else Scene.update(S, ui);
+    document.getElementById('rotate').innerHTML = renderRotate();
+    Room.setActive(inRoom);
+    if (inRoom) { Room.update(S, ui); Room.fit(); } else Scene.update(S, ui);
   }
   $modal.innerHTML = ui.confirmLeave ? renderLeaveConfirm() : ui.rules ? renderRules() : Tutorial.isOpen() ? Tutorial.html() : '';
 }
 function renderHudOnly() {
   const h = document.getElementById('hud');
-  if (h && viewMode() === 'room') h.innerHTML = renderHud();
-}
-function renderSheetOnly() {
-  const host = document.getElementById('sheet-host');
-  if (host) host.innerHTML = renderSheet();
-}
-function openSheet(name) {
-  ui.sheet = name;
-  render();
-  if (name === 'shop' || name === 'whisper' || name === 'say') Sound.play('click');
+  if (h) h.innerHTML = renderHud();
 }
 function renderPanel() {
   const el = document.getElementById('panel');
-  if (el) el.innerHTML = panelHtml();
+  if (!el || !S || !S.match) return;
+  const keep = el.scrollTop;
+  el.innerHTML = renderTab();
+  el.scrollTop = keep;
+  const rail = document.getElementById('rail');
+  if (rail) rail.innerHTML = renderRail();
 }
+const renderSheetOnly = () => renderPanel();
+function openSheet(name) {
+  ui.sheet = name;
+  render();
+  Sound.play('click');
+}
+// once the reveal finishes, a short reading pause starts; then everyone is "ready" on their own
+const READ_MS = 10000, SCORES_MS = 25000;
 Scene.onChange(() => {
-  if (!S || S.phase !== 'results') return;
+  if (!S) return;
+  if (S.phase === 'results' && !Scene.isPlaying() && !ui.readyAt) ui.readyAt = Date.now() + READ_MS;
   renderPanel();
-  const side = document.getElementById('side');
-  if (side) side.innerHTML = renderSide();
+  const l = document.getElementById('left');
+  if (l) l.innerHTML = renderLeft();
 });
+function sendReady() {
+  if (ui.readySent) return;
+  ui.readySent = true;
+  socket.emit('ready');
+  renderPanel();
+}
+setInterval(() => {
+  if (!S || !['results', 'dungeonEnd'].includes(S.phase)) return;
+  if (!ui.readyAt && ui.revealGuard && Date.now() > ui.revealGuard) ui.readyAt = Date.now() + READ_MS;
+  if (!ui.readyAt) return;
+  const left = Math.max(0, Math.ceil((ui.readyAt - Date.now()) / 1000));
+  const el = document.getElementById('ready-count');
+  if (el) el.textContent = left;
+  if (left <= 0) sendReady();
+}, 250);
+function renderRotate() {
+  const full = canFullscreen() && !installedApp()
+    ? '<button class="pbtn gold" data-act="fullscreen">Play full screen</button>'
+    : isIPhone() && !installedApp() ? '<p class="small">For full screen on iPhone: tap Share, then <b>Add to Home Screen</b>, and open the game from there.</p>' : '';
+  return `<div class="rotate-box">
+    <div class="rotate-phone" aria-hidden="true"></div>
+    <h2>Turn your phone sideways</h2>
+    <p>The dungeon needs the whole screen. Hold your phone in landscape to play.</p>
+    ${full}
+  </div>`;
+}
 
 const soundBtn = () => `<button class="pbtn sm quiet" data-act="sound" aria-pressed="${!Sound.isMuted()}">Sound ${Sound.isMuted() ? 'off' : 'on'}</button>`;
 
@@ -481,7 +521,7 @@ function renderBar() {
     ${chips}
     <span class="spacer"></span>
     <span class="timer" id="timer" hidden>${Sprites.icon('hourglass', 2)}<span id="timer-val"></span></span>
-    <button class="pbtn sm quiet" data-act="sheet" data-v="menu" aria-haspopup="dialog">Menu</button>`;
+`;
 }
 
 function renderTitle() {
@@ -529,42 +569,23 @@ function partyRows() {
   }).join('');
   return rows;
 }
-function renderSide() {
+function renderLeft() {
   const d = D();
   if (!d) return '';
-  if (S.phase === 'matchEnd') return `<div id="sheet-host">${renderSheet()}</div><div class="win"><div class="win-title">Score by dungeon</div>${renderHistory()}</div>`;
-  const rows = partyRows();
   const m = S.match;
-  const totals = m.history.length ? `<div class="win"><div class="win-title">Match scores</div><table class="scores"><tbody>${[...m.dmOrder].sort((a, b) => m.totals[b] - m.totals[a]).map((id) => `<tr><td>${esc(pname(id))}</td><td class="num">${m.totals[id].toFixed(1)}</td></tr>`).join('')}</tbody></table></div>` : '';
+  const order = [...m.dmOrder].sort((a, b) => m.totals[b] - m.totals[a]);
+  const totals = m.history.length ? `<div class="win scores-win"><div class="win-title">Match scores</div><table class="scores"><tbody>${order.map((id) => `<tr class="${id === S.me ? 'me' : ''}"><td>${esc(pname(id))}${(S.players.find((p) => p.id === id) || {}).left ? ' <span class="tag">Left</span>' : ''}</td><td class="num">${m.totals[id].toFixed(1)}</td></tr>`).join('')}</tbody></table></div>` : '';
+  if (S.phase === 'matchEnd') return totals;
   return `
-    <div id="sheet-host">${renderSheet()}</div>
     <div class="win party-win">
-      <div class="win-title">The party</div>
-      <p class="small" style="margin-bottom:6px"><span class="tag host">DM</span> ${esc(pname(d.dmId))}</p>
-      <ul class="party">${rows}</ul>
+      <div class="win-title">Party</div>
+      <p class="small dmline"><span class="tag host">DM</span> ${esc(pname(d.dmId))}</p>
+      <ul class="party">${partyRows()}</ul>
       <div class="wheel-mini" title="Each element beats the next one">
-        ${['water', 'fire', 'air', 'earth', 'water'].map((e) => `<span class="el-${e}">${Sprites.icon(e, 2)} ${cap(e)}</span>`).join('<span class="sep">›</span>')}
+        ${['water', 'fire', 'air', 'earth', 'water'].map((e) => `<span class="el-${e}">${Sprites.icon(e, 2)}<i>${cap(e)}</i></span>`).join('<span class="sep">›</span>')}
       </div>
-      <p class="muted small" style="margin:4px 0 0">Each element beats the next.</p>
     </div>
     ${totals}`;
-}
-
-/* ---------- panel by phase ---------- */
-function panelHtml() {
-  const d = D();
-  if (!d && S.phase !== 'matchEnd') return '';
-  if (viewMode() === 'room') return '';
-  if (S.phase === 'matchEnd') return renderMatchEnd();
-  if (S.phase === 'dungeonEnd') return renderDungeonEnd();
-  if (S.phase === 'setup') return renderSetup();
-  if (S.phase === 'dm') {
-    if (d.role === 'dm') return renderDmBuilder();
-    return '';
-  }
-  if (S.phase === 'adv') return d.role === 'dm' ? renderDmWatch() : d.role === 'ghost' ? renderGhost() : renderAdventurer();
-  if (S.phase === 'results') return renderResults();
-  return '';
 }
 
 function steps(list) {
@@ -588,7 +609,7 @@ function renderSetup() {
     return `<div class="win">
       <p>This dungeon has <b>${d.rounds}</b> rounds and <b>${d.doorsCount}</b> doors per round. The pot is <span class="gold">${d.P} gold</span>.</p>
       <p class="muted" style="margin:0">Every coin the adventurers don’t hold at the end is yours, including what they spend in the shop. Each round you get gold to hide and mana for traps. Unspent mana carries over.</p>
-    </div>${sayBox('dm', true)}`;
+    </div>`;
   }
   const mine = d.mine;
   const aff = EL.map((e) => `
@@ -627,71 +648,144 @@ function renderShop() {
 }
 
 /* ----- action bar under the room ----- */
-function sheetBtn(name, label, dot) {
-  return `<button class="pbtn ${ui.sheet === name ? 'on' : ''}" data-act="sheet" data-v="${name}">${label}${dot ? '<span class="dot" aria-label="needs you"></span>' : ''}</button>`;
-}
 function renderHud() {
   const d = D();
   if (!d) return '';
   const role = d.role;
+  if (viewMode() !== 'room') return '';
   const btns = [];
   if (role === 'adv' || role === 'ghost') {
     const n = ui.near;
-    let label = role === 'ghost' ? 'Float up to someone' : 'Walk up to something';
-    if (n && n.type === 'door') {
+    if (n && n.type === 'door' && role === 'adv' && S.phase === 'adv') {
       const st = scanState(n.i);
       btns.push(`<button class="pbtn gold act-btn" data-act="scanDoor" data-i="${n.i}" ${st.ok ? '' : 'disabled'}>${Sprites.icon('flask', 2)} ${st.label}</button>`);
       btns.push(`<button class="pbtn" data-act="chooseDoor" data-i="${n.i}">Choose Door ${ROMAN[n.i]}</button>`);
     } else {
-      if (n) label = n.type === 'shop' ? 'Shop' : n.type === 'fire' ? 'Rest by the fire' : `Whisper to ${esc(pname(n.id))}`;
-      btns.push(`<button class="pbtn gold act-btn" data-act="roomAct" ${n ? '' : 'disabled'}>${label}</button>`);
+      let label = role === 'ghost' ? 'Float up to someone' : 'Walk up to something';
+      if (n) label = n.type === 'shop' ? 'Shop' : n.type === 'fire' ? 'Rest by the fire' : n.type === 'door' ? `Door ${ROMAN[n.i]}` : `Whisper to ${esc(pname(n.id))}`;
+      btns.push(`<button class="pbtn gold act-btn" data-act="roomAct" ${n && n.type !== 'door' ? '' : 'disabled'}>${label}</button>`);
+    }
+    if (role === 'adv' && d.mine) {
+      btns.push(`<span class="oil-chip" title="Oil for your lantern: one flask per scan">${Sprites.icon('flask', 2)} ${d.mine.flasks}/${d.mine.flaskCap}</span>`);
+      if (S.phase === 'adv' && d.mine.inv.lens > 0) btns.push(`<button class="pbtn ${ui.useLens ? 'on' : ''}" data-act="lensToggle" aria-pressed="${!!ui.useLens}">${Sprites.icon('eye', 2)} Lens ${ui.useLens ? 'on' : 'off'}</button>`);
     }
   }
-  if (role === 'adv' && d.mine && ['setup', 'dm', 'adv'].includes(S.phase)) {
-    btns.push(`<span class="oil-chip" title="Oil for your lantern: one flask per scan">${Sprites.icon('flask', 2)} ${d.mine.flasks}/${d.mine.flaskCap}</span>`);
-    if (S.phase === 'adv' && d.mine.inv.lens > 0) btns.push(`<button class="pbtn ${ui.useLens ? 'on' : ''}" data-act="lensToggle" aria-pressed="${!!ui.useLens}">${Sprites.icon('eye', 2)} Lens ${ui.useLens ? 'on' : 'off'}</button>`);
-  }
-  if (S.phase === 'setup' && role === 'adv') btns.push(sheetBtn('setup', 'Gear up', !d.mine.setupReady));
-  if (S.phase === 'adv' && role === 'adv') btns.push(sheetBtn('journal', 'Journal', !d.mine.action));
-  if (S.phase === 'adv' && role === 'ghost') btns.push(sheetBtn('haunt', 'Haunt', !d.ghostDone));
-  if (role === 'dm') btns.push(sheetBtn('dm', 'Dungeon', false));
-  btns.push(sheetBtn('say', 'Say', false));
-  btns.push(`<button class="pbtn party-btn ${ui.sheet === 'party' ? 'on' : ''}" data-act="sheet" data-v="party">Party</button>`);
   const touch = window.matchMedia('(pointer: coarse)').matches;
-  const hint = role === 'dm' ? 'You’re watching the room.' : touch ? 'Tap where to go. Tap someone to walk up to them.' : 'Walk with the arrow keys or WASD. Press E to use what you’re next to, or click where to go.';
-  return `<div class="hud">${btns.join('')}</div><p class="hud-hint">${hint}</p>`;
+  let hint;
+  if (role === 'dm') hint = S.phase === 'dm' ? 'Tap a door to select it, then use the Traps screen on the right.' : 'You’re watching the room. Your traps show on the floor.';
+  else hint = touch ? 'Tap where to go. Tap someone to walk up to them.' : 'Arrow keys or WASD to walk, E to use, or click where to go.';
+  return `${btns.length ? `<div class="hud">${btns.join('')}</div>` : ''}<p class="hud-hint">${hint}</p>`;
 }
-function defaultSheet() {
+
+/* ----- the sidebar of screens ----- */
+const TABS = {
+  gear: { label: 'Gear up', icon: () => Sprites.icon('amulet', 3) },
+  journal: { label: 'Journal', icon: () => Sprites.icon('book', 3) },
+  shop: { label: 'Shop', icon: () => Sprites.icon('bag', 3) },
+  talk: { label: 'Talk', icon: () => Sprites.icon('bubble', 3) },
+  history: { label: 'History', icon: () => Sprites.icon('scroll', 3) },
+  menu: { label: 'Menu', icon: () => Sprites.icon('gear', 3) },
+  haunt: { label: 'Haunt', icon: () => Sprites.ghost(4, 2).split('</svg>')[0] + '</svg>' },
+  traps: { label: 'Traps', icon: () => Sprites.icon('spikes', 3) },
+  story: { label: 'This round', icon: () => Sprites.icon('eye', 3) },
+  scores: { label: 'Scores', icon: () => Sprites.icon('crown', 3) },
+};
+function tabsFor() {
   const d = D();
-  if (!d) return null;
-  const wide = window.innerWidth >= 960;
-  if (S.phase === 'setup' && d.role === 'adv' && !d.mine.setupReady) return 'setup';
-  if (S.phase === 'adv' && d.role === 'adv' && wide) return 'journal';
-  if (S.phase === 'adv' && d.role === 'ghost' && wide) return 'haunt';
-  if ((S.phase === 'adv' || S.phase === 'setup') && d.role === 'dm' && wide) return 'dm';
-  return null;
+  if (!d) return ['menu'];
+  const role = d.role, ph = S.phase;
+  if (ph === 'matchEnd') return ['scores', 'menu'];
+  if (ph === 'dungeonEnd') return ['scores', 'history', 'talk', 'menu'];
+  if (ph === 'results') return ['story', 'history', 'talk', 'menu'];
+  if (role === 'dm') return ['traps', 'talk', 'history', 'menu'];
+  if (role === 'ghost') return (ph === 'adv' ? ['haunt'] : []).concat(['talk', 'history', 'menu']);
+  return (ph === 'setup' ? ['gear'] : []).concat(['journal', 'shop', 'talk', 'history', 'menu']);
 }
-function renderSheet() {
+function defaultTab() {
   const d = D();
-  const name = ui.sheet;
-  if (!name || !S) return '';
-  let title = '', body = '';
-  if (name === 'menu') { title = 'Menu'; body = renderMenu(); }
-  else if (!d) return '';
-  else if (name === 'setup' && d.role === 'adv') { title = 'Gear up'; body = renderSetup(); }
-  else if ((name === 'journal' || name === 'plan') && d.role === 'adv' && S.phase === 'adv') { title = 'Journal'; body = renderJournal(); }
-  else if (name === 'haunt' && d.role === 'ghost' && S.phase === 'adv') { title = 'Haunt'; body = renderGhost(); }
-  else if (name === 'dm' && d.role === 'dm') { title = 'Your dungeon'; body = S.phase === 'adv' ? renderDmWatch() : renderSetup(); }
-  else if (name === 'shop' && d.role === 'adv') { title = 'The shopkeeper'; body = renderShop(); }
-  else if (name === 'say') { title = 'Say something'; body = renderSay(); }
-  else if (name === 'whisper') { title = 'Whisper'; body = renderWhisper(); }
-  else if (name === 'party') { title = 'The party'; body = renderPartyList(); }
-  else return '';
-  return `<div class="win sheet open" role="dialog" aria-label="${title}">
-    <div class="sheet-head"><h3>${title}</h3><button class="pbtn sm" data-act="sheetClose" aria-label="Close">✕</button></div>
-    ${body}
-  </div>`;
+  if (!d) return 'menu';
+  const ph = S.phase, role = d.role;
+  if (ph === 'matchEnd' || ph === 'dungeonEnd') return 'scores';
+  if (ph === 'results') return 'story';
+  if (role === 'dm') return 'traps';
+  if (role === 'ghost') return ph === 'adv' ? 'haunt' : 'talk';
+  if (ph === 'setup') return d.mine && d.mine.setupReady ? 'journal' : 'gear';
+  return 'journal';
 }
+function tabNeedsYou(t) {
+  const d = D();
+  if (!d) return false;
+  if (t === 'gear') return d.mine && !d.mine.setupReady;
+  if (t === 'journal') return S.phase === 'adv' && d.mine && !d.mine.action;
+  if (t === 'haunt') return S.phase === 'adv' && !d.ghostDone;
+  if (t === 'traps') return S.phase === 'dm';
+  if (t === 'story' || t === 'scores') return ['results', 'dungeonEnd'].includes(S.phase) && !ui.readySent;
+  return false;
+}
+function renderRail() {
+  return tabsFor().map((t) => `<button class="rail-btn ${ui.sheet === t ? 'on' : ''}" data-act="sheet" data-v="${t}" aria-pressed="${ui.sheet === t}" title="${TABS[t].label}">
+      <span class="rail-icon">${TABS[t].icon()}</span><span class="rail-label">${TABS[t].label}</span>${tabNeedsYou(t) ? '<span class="dot" aria-label="needs you"></span>' : ''}
+    </button>`).join('');
+}
+function renderTab() {
+  const d = D();
+  const t = ui.sheet;
+  let body = '';
+  if (t === 'menu') body = renderMenu();
+  else if (!d) body = '';
+  else if (t === 'gear') body = renderSetup();
+  else if (t === 'journal') body = renderBook();
+  else if (t === 'shop') body = d.role === 'adv' && ['setup', 'dm', 'adv'].includes(S.phase) ? renderShop() : '<p class="muted">The shop is closed right now.</p>';
+  else if (t === 'talk') body = renderTalk();
+  else if (t === 'history') body = renderHistoryTab();
+  else if (t === 'haunt') body = renderGhost();
+  else if (t === 'traps') body = S.phase === 'dm' ? renderWorkshop() : S.phase === 'adv' ? renderDmSummary() : renderSetup();
+  else if (t === 'story') body = renderStory();
+  else if (t === 'scores') body = S.phase === 'matchEnd' ? renderMatchEnd() + `<div class="win"><div class="win-title">Score by dungeon</div>${renderHistory()}</div>` : renderScoresTab();
+  return `<div class="panel-inner"><h3 class="panel-head">${TABS[t] ? TABS[t].label : ''}</h3>${body}</div>`;
+}
+function readyBox(nextLabel) {
+  const need = S.players.filter((p) => p.connected && !p.left).length;
+  const readyN = (S.ready || []).length;
+  if (ui.readySent) return `<div class="readybox"><span class="muted">Waiting for the others… ${readyN} of ${need} ready.</span></div>`;
+  if (!ui.readyAt) return '';
+  const left = Math.max(0, Math.ceil((ui.readyAt - Date.now()) / 1000));
+  return `<div class="readybox"><button class="pbtn gold" data-act="ready">Ready</button><span>${nextLabel} in <b id="ready-count">${left}</b>s${readyN ? ` (${readyN} of ${need} ready)` : ''}</span></div>`;
+}
+function storyHtml(r) {
+  const lines = [];
+  if (r.dmTimedOut) lines.push('<p class="muted">The DM ran out of time, so the dungeon set itself up.</p>');
+  r.doors.forEach((x) => lines.push(`<p><span class="dn">${ROMAN[x.index]}</span>${esc(x.lines.join(' '))}</p>`));
+  r.rests.forEach((x) => lines.push(`<p>${esc(pname(x.id))} ${x.auto ? 'didn’t choose in time and rested' : 'rested by the fire'}${x.healed ? ` (+${x.healed} HP)` : ''}.</p>`));
+  r.haunts.forEach((x) => lines.push(`<p class="ghostname">${esc(pname(x.ghost))} haunted ${esc(pname(x.target))}${x.stolen ? ` and stole ${x.stolen} gold.` : ', who took no trap damage.'}</p>`));
+  r.deaths.forEach((x) => lines.push(`<p style="color:var(--blood)">${esc(pname(x.id))} died, dropped ${x.dropped} gold, and rose as a ghost.</p>`));
+  return `<div class="log">${lines.join('')}</div>`;
+}
+function renderStory() {
+  const d = D();
+  const r = (d.stories || [])[d.stories.length - 1];
+  const playing = Scene.isPlaying();
+  const last = d.round >= d.rounds || d.advs.every((a) => !a.alive || a.left);
+  return `<div class="row" style="margin-bottom:10px">${playing ? '<button class="pbtn" data-act="skip">Skip</button>' : '<button class="pbtn" data-act="replay">Replay</button>'}</div>
+    ${playing ? '' : readyBox(last ? 'Scores' : 'Next round')}
+    ${playing || !r ? '<p class="muted">The doors are opening…</p>' : storyHtml(r)}`;
+}
+function renderHistoryTab() {
+  const d = D();
+  const st = (d && d.stories ? d.stories : []).slice().reverse();
+  if (!st.length) return '<p class="muted">Nothing has happened in this dungeon yet. Each round’s story will be kept here.</p>';
+  return st.map((r) => `<div class="hist"><h4>Round ${r.round}</h4>${storyHtml(r)}</div>`).join('');
+}
+function renderScoresTab() {
+  const last = S.match.dIndex + 1 >= S.match.total;
+  return readyBox(last ? 'Final scores' : 'Next dungeon') + renderDungeonEnd();
+}
+function renderTalk() {
+  const d = D();
+  const roam = ['setup', 'dm', 'adv'].includes(S.phase) && (d.role === 'adv' || d.role === 'ghost');
+  return renderSay() + (roam ? `<h4 class="j-sub">Whisper</h4>${renderWhisper()}` : '');
+}
+
 function renderSay() {
   const voice = myVoice();
   const list = (voice && cfg().MESSAGES[voice]) || [];
@@ -715,9 +809,6 @@ function renderWhisper() {
       <div class="seg" style="margin-top:6px">${Array.from({ length: D().doorsCount }, (_, k) => `<button class="pbtn sm" data-act="whisperDoor" data-i="${k}">Door ${ROMAN[k]}</button>`).join('')}<button class="pbtn sm quiet" data-act="whisperCancel">Cancel</button></div></div>` : ''}
     <div class="says">${huddle.map((t, k) => `<button class="say-chip whisper" data-act="whisper" data-i="${k}" data-id="${to}">${esc(t.split('{door}').join('…'))}</button>`).join('')}</div>
     ${heard}`;
-}
-function renderPartyList() {
-  return `<ul class="party">${partyRows()}</ul>`;
 }
 function renderMenu() {
   const device = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -748,15 +839,6 @@ function renderLeaveConfirm() {
 
 /* ----- waiting room ----- */
 const myVoice = () => { const d = D(); return !d ? null : d.role === 'dm' ? 'dm' : d.role === 'ghost' ? 'ghost' : d.role === 'adv' ? 'adventurer' : null; };
-function sayBox(voice, open) {
-  if (!voice) return '';
-  const list = cfg().MESSAGES[voice] || [];
-  if (!list.length) return '';
-  const cooling = Date.now() < ui.sayUntil;
-  return `<details class="win say-win" ${open ? 'open' : ''}><summary class="win-title">Say something <span class="muted">Everyone sees it above your head</span></summary>
-    <div class="says">${list.map((t, k) => `<button class="say-chip" data-act="say" data-i="${k}" ${cooling ? 'disabled' : ''}>${esc(t)}</button>`).join('')}</div>
-  </details>`;
-}
 function nearbyIds() {
   const d = D();
   if (!d || !d.pos || !d.pos[S.me]) return [];
@@ -764,145 +846,146 @@ function nearbyIds() {
   const me = d.pos[S.me];
   return d.advIds.filter((id) => id !== S.me && d.pos[id] && Math.hypot((me.x - d.pos[id].x) * c.FLOOR_W, (me.y - d.pos[id].y) * c.FLOOR_H) <= c.NEAR);
 }
-function renderWaitingRoom(voice, note) {
-  const near = nearbyIds();
-  if (ui.whisperTo && !near.includes(ui.whisperTo)) ui.whisperTo = null;
-  const to = ui.whisperTo || near[0];
-  const huddle = cfg().MESSAGES.huddle || [];
-  let whisper;
-  if (!near.length) {
-    whisper = `<p class="muted small" style="margin:0">Tap someone in the hall to walk right up to them. Then you can whisper privately. Everyone sees you huddle, but only they read it.</p>`;
-  } else {
-    const pick = ui.whisperPick !== null ? huddle[ui.whisperPick] : null;
-    whisper = `
-      ${near.length > 1 ? `<div class="seg" style="margin-bottom:8px">${near.map((id) => `<button class="pbtn sm ${id === to ? 'on' : ''}" data-act="whisperTo" data-id="${id}">${esc(pname(id))}</button>`).join('')}</div>` : ''}
-      <p class="small" style="margin:0 0 8px">Whisper to <b>${esc(pname(to))}</b>:</p>
-      ${pick ? `<div class="note" style="margin:0 0 8px">${esc(pick.split('{door}').join('…'))} <span class="muted">Which door?</span>
-        <div class="seg" style="margin-top:6px">${Array.from({ length: D().doorsCount }, (_, k) => `<button class="pbtn sm" data-act="whisperDoor" data-i="${k}">Door ${ROMAN[k]}</button>`).join('')}<button class="pbtn sm quiet" data-act="whisperCancel">Cancel</button></div></div>` : ''}
-      <div class="says">${huddle.map((t, k) => `<button class="say-chip whisper" data-act="whisper" data-i="${k}" data-id="${to}">${esc(t.split('{door}').join('…'))}</button>`).join('')}</div>`;
-  }
-  const heard = ui.whispers.slice(0, 4).map((w) => `<p class="small" style="margin:6px 0 0"><span class="ghostname">${w.from === S.me ? `You whispered to ${esc(pname(w.to))}` : `${esc(pname(w.from))} whispered`}:</span> ${esc(w.text)}</p>`).join('');
-  return `<div class="win room-win">
-    <div class="win-title">Waiting room <span class="muted">${note ? note + ' ' : ''}Tap the floor to walk around. Tap the merchant to shop.</span></div>
-    <div class="huddle-box">${whisper}${heard}</div>
-  </div>${sayBox(voice, true)}`;
+/* ----- the DM's trap workshop ----- */
+const GOLD_STEP = 5;
+function evenGold() {
+  const d = D();
+  const n = ui.dm.length;
+  const base = Math.floor(d.budget / n / GOLD_STEP) * GOLD_STEP;
+  ui.dm.forEach((x, i) => (x.gold = base));
+  ui.dm[0].gold += d.budget - base * n;
 }
-
-/* ----- DM builder: drag cards onto the doors ----- */
-function cardHtml(kind, data, inner, extra = '') {
-  const t = ui.tool;
-  const sel = t && t.kind === kind && Object.entries(data).every(([k, v]) => t[k] === v);
-  const attrs = Object.entries(data).map(([k, v]) => `data-${k}="${v}"`).join(' ');
-  return `<div class="card ${sel ? 'sel' : ''} ${extra}" data-drag="${kind}" ${attrs} role="button" tabindex="0" aria-pressed="${!!sel}">${inner}</div>`;
+function baitGold(sel) {
+  const d = D();
+  const min = cfg().MIN_DOOR_GOLD;
+  ui.dm.forEach((x, i) => (x.gold = min));
+  ui.dm[sel].gold = d.budget - min * (ui.dm.length - 1);
 }
-function renderDmBuilder() {
+const trapCost = (x) => (x.tier === 'none' ? 0 : cfg().TRAPS[x.tier].cost) + (x.illusion === 'honest' ? 0 : cfg().ILLUSION_COST);
+function renderWorkshop() {
   const d = D();
   const c = cfg();
-  const left = goldLeft();
   const cost = dmCost();
   const mana = d.dm.mana;
   const spare = mana - cost;
-  const living = d.advs.filter((a) => a.alive);
-  const elNote = (e) => {
-    const weak = living.filter((a) => c.WEAK_TO[a.affinity] === e).map((a) => esc(pname(a.id)));
-    const res = living.filter((a) => a.affinity === e).map((a) => esc(pname(a.id)));
-    return (weak.length ? `<span class="dm-el-note w">Hurts ${weak.join(', ')} more</span>` : '') + (res.length ? `<span class="dm-el-note r">${res.join(', ')} resist${res.length > 1 ? '' : 's'}</span>` : '');
-  };
-  const tabs = EL.map((e) => `<button class="pbtn sm ${ui.dmEl === e ? 'on' : ''}" data-act="dmElTab" data-v="${e}">${Sprites.icon(e, 2)} <span class="el-${e}">${cap(e)}</span>${elNote(e)}</button>`).join('');
-  const traps = ['minor', 'major', 'deadly'].map((t) => cardHtml('trap', { tier: t, element: ui.dmEl },
-    `${Sprites.icon(ui.dmEl, 3)}<b>${c.TRAPS[t].name}</b><span>${c.TRAPS[t].dmg} damage</span><span class="cost">${Sprites.icon('mana', 2)} ${c.TRAPS[t].cost}</span>`,
-    c.TRAPS[t].cost > spare ? 'pricey' : '')).join('');
-  const runes = ['none', ...EL].map((r) => cardHtml('rune', { rune: r },
-    `${r === 'none' ? Sprites.icon('none', 3) : Sprites.icon(r, 3)}<b>${r === 'none' ? 'Silent' : cap(r)}</b><span>Fake clue</span><span class="cost">${Sprites.icon('mana', 2)} ${c.ILLUSION_COST}</span>`,
-    c.ILLUSION_COST > spare ? 'pricey' : '')).join('');
-  const goldCard = cardHtml('gold', {}, `${Sprites.icon('bag', 4)}<b>${left}</b><span>gold to hide</span><span class="cost">10 per drop</span>`, left ? 'chest' : 'chest empty');
-  const eraser = cardHtml('erase', {}, `${Sprites.icon('erase', 3)}<b>Clear</b><span>Remove traps and fake clues</span>`);
-  const rows = ui.dm.map((x, i) => {
-    const trap = x.tier === 'none' ? '' : `<span class="ttag">${Sprites.icon(x.element, 2)} ${c.TRAPS[x.tier].name} ${cap(x.element)} <button class="x" data-act="dmClear" data-i="${i}" data-v="trap" aria-label="Remove trap from door ${ROMAN[i]}">✕</button></span>`;
-    const ill = x.illusion === 'honest' ? '' : `<span class="ttag spite">Fake: ${x.illusion === 'none' ? 'silent' : cap(x.illusion)} <button class="x" data-act="dmClear" data-i="${i}" data-v="rune" aria-label="Remove fake clue from door ${ROMAN[i]}">✕</button></span>`;
-    return `<div class="door-row">
-      <b class="dn">Door ${ROMAN[i]}</b>
-      <span class="stepper"><button class="pbtn sm" data-act="dmGold" data-i="${i}" data-v="-10" aria-label="10 less gold on door ${ROMAN[i]}">−10</button><span class="val">${x.gold}</span><button class="pbtn sm" data-act="dmGold" data-i="${i}" data-v="10" aria-label="10 more gold on door ${ROMAN[i]}" ${left < 10 ? 'disabled' : ''}>+10</button></span>
-      ${trap}${ill}${!trap && !ill ? '<span class="muted small">No trap</span>' : ''}
-    </div>`;
+  const sel = Math.min(ui.dmSel || 0, ui.dm.length - 1);
+  const x = ui.dm[sel];
+  const others = cost - trapCost(x);
+  const crystals = mana <= 40
+    ? Array.from({ length: mana }, (_, k) => `<i class="${k < spare ? 'lit' : ''}"></i>`).join('')
+    : `<span class="mana-fill"><b style="width:${Math.max(0, (spare / mana) * 100)}%"></b></span>`;
+  const bar = ui.dm.map((g, i) => `${i ? `<span class="gb-handle" data-h="${i - 1}" role="slider" aria-label="Move gold between door ${ROMAN[i - 1]} and door ${ROMAN[i]}" tabindex="0"></span>` : ''}<button class="gb-seg ${i === sel ? 'sel' : ''}" style="flex:${g.gold}" data-act="dmSel" data-i="${i}">${ROMAN[i]}: <b>${g.gold}</b></button>`).join('');
+  const showsNow = x.illusion !== 'honest' ? x.illusion : x.tier === 'none' ? 'none' : x.element;
+  const living = d.advs.filter((a) => a.alive && !a.left);
+  const hurts = (e) => living.filter((a) => c.WEAK_TO[a.affinity] === e).map((a) => esc(pname(a.id)));
+  const tabs = EL.map((e) => `<button class="pbtn sm ${ui.dmEl === e ? 'on' : ''}" data-act="dmElTab" data-v="${e}" title="${hurts(e).length ? 'Hurts ' + hurts(e).join(', ') + ' more' : ''}">${Sprites.icon(e, 2)}${hurts(e).length ? '<span class="hurtdot"></span>' : ''}</button>`).join('');
+  const cards = ['minor', 'major', 'deadly'].map((t) => {
+    const tc = c.TRAPS[t];
+    const afford = others + tc.cost + (x.illusion === 'honest' ? 0 : c.ILLUSION_COST) <= mana;
+    const on = x.tier === t && x.element === ui.dmEl;
+    return `<button class="tcard el-${ui.dmEl} ${on ? 'on' : ''}" data-act="dmCard" data-v="${t}" ${afford || on ? '' : 'disabled'}>
+      <span class="tc-name">${tc.name}</span>${Sprites.icon(ui.dmEl, 3)}<span class="tc-dmg">${tc.dmg} dmg</span><span class="tc-cost">${Sprites.icon('mana', 1)} ${tc.cost}</span></button>`;
   }).join('');
-  const ok = left === 0 && cost <= mana && ui.dm.every((x) => x.gold >= c.MIN_DOOR_GOLD);
-  const anyTrap = ui.dm.some((x) => x.tier !== 'none' || x.illusion !== 'honest');
-  const toolName = !ui.tool ? '' : ui.tool.kind === 'gold' ? '10 gold' : ui.tool.kind === 'trap' ? `${c.TRAPS[ui.tool.tier].name} ${cap(ui.tool.element)} trap` : ui.tool.kind === 'rune' ? `fake ${ui.tool.rune === 'none' ? 'silent' : ui.tool.rune} clue` : 'the eraser';
-  return `<div class="win builder">
-    ${steps([
-      { text: left === 0 ? 'Gold hidden' : `Hide the gold (${left} left)`, done: left === 0 },
-      { text: 'Add traps or fake clues (optional)', done: anyTrap },
-      { text: 'Lock in', done: false },
-    ])}
-    <p class="hint">${ui.tool ? `Holding <b>${toolName}</b>: tap doors above to place it.` : 'Drag a card onto a door above, or tap a card and then tap doors.'}</p>
-    <div class="b-top">
-      ${goldCard}
-      <div class="b-mana">
-        <div class="totals" style="margin:0">${Sprites.icon('mana', 2)} Mana <b style="${cost > mana ? 'color:var(--blood)' : ''}">${spare}</b> left of ${mana}</div>
-        <p class="mana-note" style="margin:4px 0 8px">Mana is your trap budget. ${d.dm.nextIncome ? `You get ${d.dm.nextIncome} more next round, and anything you don’t spend carries over.` : 'This is the last round, so spend it.'}</p>
-        <button class="pbtn sm" data-act="dmSpread" ${left ? '' : 'disabled'}>Spread the rest evenly</button>
-      </div>
+  const fakeAfford = others + (x.tier === 'none' ? 0 : c.TRAPS[x.tier].cost) + c.ILLUSION_COST <= mana;
+  const fakes = [['honest', 'Real clue'], ['none', 'Silent'], ['fire', 'Smoke'], ['water', 'Dripping'], ['earth', 'Rumbling'], ['air', 'Draft']]
+    .map(([v, l]) => `<button class="pbtn sm ${x.illusion === v ? 'on' : ''}" data-act="dmFake" data-v="${v}" ${v === 'honest' || x.illusion === v || fakeAfford || x.illusion !== 'honest' ? '' : 'disabled'}>${v !== 'honest' && v !== 'none' ? Sprites.icon(v, 2) : ''}${l}</button>`).join('');
+  const weakNote = living.length ? `<p class="small muted" style="margin:6px 0 0">Weak to it: ${EL.map((e) => hurts(e).length ? `<span class="el-${e}">${cap(e)}</span> ${hurts(e).join(', ')}` : '').filter(Boolean).join('; ') || 'nobody yet'}.</p>` : '';
+  return `<div class="workshop">
+    <div class="mana-row"><span class="crystals" aria-hidden="true">${crystals}</span><span><b>${spare}</b> of ${mana} mana left</span></div>
+    <p class="mana-note">Mana is your trap budget. ${d.dm.nextIncome ? `+${d.dm.nextIncome} next round; whatever you don’t spend carries over.` : 'Last round: spend it.'}</p>
+    <div class="ws-label">Gold: ${d.budget} to hide</div>
+    <div class="goldbar" id="goldbar">${bar}</div>
+    <p class="small muted" style="margin:4px 0 8px">Drag a line to move gold between doors. Every door keeps at least ${c.MIN_DOOR_GOLD}.</p>
+    <div class="row"><button class="pbtn sm" data-act="dmEven">Even</button><button class="pbtn sm" data-act="dmBait">Bait: most on Door ${ROMAN[sel]}</button></div>
+    <div class="ws-door">
+      <div class="ws-label">Door ${ROMAN[sel]} <span class="muted">(tap a door to pick another)</span></div>
+      <p class="small" style="margin:0">${x.gold} gold. Trap: <b>${x.tier === 'none' ? 'none' : `${c.TRAPS[x.tier].name} ${cap(x.element)}`}</b>. Shows: <b class="el-${showsNow}">${SHORT[showsNow]}</b>${x.illusion !== 'honest' ? ' <span class="ttag spite">fake</span>' : ''}</p>
     </div>
-    <div class="b-label">Traps <span class="muted">Pick an element, then drag a trap onto a door</span></div>
-    <div class="seg el-tabs">${tabs}</div>
-    <div class="cards">${traps}</div>
-    <div class="b-label">Fake clues <span class="muted">Make a door show a different clue</span></div>
-    <div class="cards">${runes}${eraser}</div>
-    <div class="b-label">Your dungeon</div>
-    <div class="door-rows">${rows}</div>
-    <div class="row" style="margin-top:14px">
-      <button class="pbtn gold" data-act="dmSubmit" ${ok ? '' : 'disabled'}>Lock in the dungeon</button>
-      <span class="muted small">${left !== 0 ? `Hide ${left} more gold first.` : cost > mana ? 'Not enough mana.' : 'If time runs out, your current setup is used.'}</span>
-    </div>
-  </div>
-  ${sayBox('dm', false)}`;
+    <div class="ws-label">Your hand <span class="seg el-tabs-mini">${tabs}</span></div>
+    <div class="tcards">${cards}</div>
+    ${weakNote}
+    <div class="ws-label">Fake clue <span class="muted">(${Sprites.icon('mana', 1)} ${c.ILLUSION_COST})</span></div>
+    <div class="seg fakes">${fakes}</div>
+    <div class="row" style="margin-top:10px"><button class="pbtn sm quiet" data-act="dmClear">Clear Door ${ROMAN[sel]}</button></div>
+    <button class="pbtn gold lockin" data-act="dmSubmit">Lock in the dungeon</button>
+    <p class="small muted" style="margin:6px 0 0">If time runs out, whatever you’ve built is used.</p>
+  </div>`;
 }
-function applyTool(tool, i) {
+function renderDmSummary() {
   const d = D();
-  const x = ui.dm[i];
-  if (!x || !tool) return;
+  const c = cfg();
+  const waiting = d.advs.filter((a) => !a.ready && !a.left).map((a) => esc(pname(a.id)));
+  const rows = (d.dm.doors || []).map((x, i) => `<tr><td><b>${ROMAN[i]}</b></td><td class="gold">${x.gold}</td><td>${x.trap ? `<span class="el-${x.trap.element}">${c.TRAPS[x.trap.tier].name} ${cap(x.trap.element)}</span>` : 'No trap'}</td><td>${x.illusion !== null ? `<span class="ttag spite">fake: ${SHORT[x.illusion]}</span>` : ''}</td></tr>`).join('');
+  return `<p style="margin-top:0">${waiting.length ? `Still choosing: ${waiting.join(', ')}.` : 'Everyone has chosen.'}</p>
+    <table class="scores"><thead><tr><th>Door</th><th>Gold</th><th>Trap</th><th></th></tr></thead><tbody>${rows}</tbody></table>
+    <p class="small muted">Watch the room: lantern beams show who is scanning which door.</p>`;
+}
+function dmApply(fn) {
+  const d = D();
+  const x = ui.dm[Math.min(ui.dmSel || 0, ui.dm.length - 1)];
   const before = { ...x };
-  if (tool.kind === 'gold') {
-    const left = goldLeft();
-    if (left <= 0) return toast('All the gold is already hidden.');
-    x.gold += Math.min(10, left);
-  } else if (tool.kind === 'trap') {
-    x.tier = tool.tier;
-    x.element = tool.element;
-  } else if (tool.kind === 'rune') {
-    x.illusion = tool.rune;
-  } else if (tool.kind === 'erase') {
-    x.tier = 'none';
-    x.illusion = 'honest';
-  }
+  fn(x);
   if (dmCost() > d.dm.mana) {
     Object.assign(x, before);
     Sound.play('empty');
-    return toast(`Not enough mana for that. You have ${d.dm.mana - dmCost()} left.`);
+    return toast('Not enough mana for that.');
   }
-  Sound.play(tool.kind === 'gold' ? 'coins' : tool.kind === 'rune' ? 'illusion' : tool.kind === 'erase' ? 'shove' : 'place', 2);
   sendDraft();
   render();
 }
-function moveGold(from, to) {
-  const c = cfg();
-  if (ui.dm[from].gold - 10 < c.MIN_DOOR_GOLD) return toast(`Every door needs at least ${c.MIN_DOOR_GOLD} gold.`);
-  ui.dm[from].gold -= 10;
-  if (to >= 0 && to !== from) ui.dm[to].gold += 10;
+// dragging the lines in the gold bar
+const goldDrag = { h: null };
+document.addEventListener('pointerdown', (e) => {
+  const h = e.target.closest('.gb-handle');
+  if (!h || !S || S.phase !== 'dm' || !D() || D().role !== 'dm') return;
+  e.preventDefault();
+  goldDrag.h = Number(h.dataset.h);
+  h.setPointerCapture && h.setPointerCapture(e.pointerId);
+});
+document.addEventListener('pointermove', (e) => {
+  if (goldDrag.h === null) return;
+  const bar = document.getElementById('goldbar');
+  if (!bar) return;
+  const d = D();
+  const min = cfg().MIN_DOOR_GOLD;
+  const r = bar.getBoundingClientRect();
+  const frac = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+  const h = goldDrag.h;
+  const before = ui.dm.slice(0, h).reduce((s, x) => s + x.gold, 0);
+  const pair = ui.dm[h].gold + ui.dm[h + 1].gold;
+  let b = Math.round((frac * d.budget) / GOLD_STEP) * GOLD_STEP;
+  b = Math.max(before + min, Math.min(before + pair - min, b));
+  const g = b - before;
+  if (g === ui.dm[h].gold) return;
+  ui.dm[h].gold = g;
+  ui.dm[h + 1].gold = pair - g;
+  // update the bar live without rebuilding the screen
+  bar.querySelectorAll('.gb-seg').forEach((seg, i) => { seg.style.flex = ui.dm[i].gold; seg.querySelector('b').textContent = ui.dm[i].gold; });
+  Room.update(S, ui);
+});
+document.addEventListener('pointerup', () => {
+  if (goldDrag.h === null) return;
+  goldDrag.h = null;
   Sound.play('coins', 1);
   sendDraft();
   render();
-}
-function spreadGold() {
-  let left = goldLeft();
-  let k = 0;
-  while (left >= 10) { ui.dm[k % ui.dm.length].gold += 10; left -= 10; k++; }
-  if (left > 0) ui.dm[0].gold += left;
-  Sound.play('coins', 4);
+});
+// keyboard: arrow keys move a focused line by 5 gold
+document.addEventListener('keydown', (e) => {
+  const h = e.target.closest && e.target.closest('.gb-handle');
+  if (!h || !['ArrowLeft', 'ArrowRight'].includes(e.key)) return;
+  e.preventDefault();
+  const i = Number(h.dataset.h);
+  const min = cfg().MIN_DOOR_GOLD;
+  const delta = e.key === 'ArrowRight' ? GOLD_STEP : -GOLD_STEP;
+  if (ui.dm[i].gold + delta < min || ui.dm[i + 1].gold - delta < min) return;
+  ui.dm[i].gold += delta;
+  ui.dm[i + 1].gold -= delta;
   sendDraft();
   render();
-}
+  const again = document.querySelector(`.gb-handle[data-h="${i}"]`);
+  if (again) again.focus();
+});
 
 function renderDmWatch() {
   const d = D();
@@ -972,6 +1055,57 @@ function renderAdventurer() {
     </div>`;
 }
 
+/* ----- the journal as a book: overview strip, ribbons, one page at a time ----- */
+function renderBook() {
+  const d = D();
+  const c = cfg();
+  const mine = d.mine;
+  if (S.phase !== 'adv') {
+    return `<div class="book"><div class="book-page">
+      <h4 class="book-title">Journal</h4>
+      <p>The doors are sealed while the DM builds. When they open, walk up to one and scan it with your lantern; what you learn is written here.</p>
+      <p>${Sprites.icon('flask', 2)} Oil: <b>${mine.flasks}</b> of ${mine.flaskCap}. You get ${mine.flasksPerRound} more each round.</p>
+    </div></div>`;
+  }
+  const a = ui.adv;
+  const marks = ui.marks || {};
+  let page = ui.page === undefined || ui.page === null ? (a.door !== null ? a.door : 0) : ui.page;
+  if (page !== 'plan' && (page < 0 || page >= d.doors.length)) page = 0;
+  const strip = d.doors.map((x, i) => {
+    const k = mine.known[i];
+    const chosen = a.door === i && !a.resting;
+    return `<button class="ov ${page === i ? 'on' : ''} ${chosen ? 'chosen' : ''}" data-act="page" data-v="${i}" aria-label="Door ${ROMAN[i]}">
+      <b>${ROMAN[i]}</b><span class="gold">${x.gold}</span><span class="ov-clue">${k ? Sprites.icon(k.clue, 2) : '?'}</span>${marks[i] ? `<span class="ov-mark m-${marks[i]}"></span>` : ''}${chosen ? '<span class="ov-star">★</span>' : ''}</button>`;
+  }).join('');
+  const ribbons = d.doors.map((_, i) => `<button class="ribbon ${page === i ? 'on' : ''}" data-act="page" data-v="${i}">${ROMAN[i]}</button>`).join('')
+    + `<button class="ribbon plan ${page === 'plan' ? 'on' : ''}" data-act="page" data-v="plan">Plan${mine.action ? '' : ' •'}</button>`;
+  let body;
+  if (page === 'plan') {
+    body = `<h4 class="book-title">Your plan</h4>${renderAdventurer()}`;
+  } else {
+    const i = page, x = d.doors[i], k = mine.known[i];
+    const chosen = a.door === i && !a.resting;
+    const clue = k
+      ? `${Sprites.icon(k.clue, 2)} Clue: <b class="el-${k.clue}">${SHORT[k.clue]}</b>${k.clue !== 'none' ? ` (${cap(k.clue)})` : ''}${elementTag(k.clue, mine.affinity)}`
+      : `Not scanned yet. ${mine.flasks > 0 ? 'Walk up to it and scan it.' : 'Your lantern is out of oil.'}`;
+    const lens = k && k.lens ? `<p>${Sprites.icon('eye', 2)} Lens: <b>${k.lens.trap ? `${c.TRAPS[k.lens.trap.tier].name} ${cap(k.lens.trap.element)} trap` : 'no trap'}</b>${k.lens.illusion ? ' <span class="ttag spite">the clue is fake</span>' : ''}</p>` : '';
+    const rumours = ui.whispers.filter((w) => w.from !== S.me && doorIn(w.text) === i).slice(0, 3).map((w) => `<p class="j-rumour">${esc(pname(w.from))}: “${esc(w.text)}”</p>`).join('');
+    const mk = Object.entries(MARK_NAMES).map(([m, label]) => `<button class="mark-btn m-${m} ${marks[i] === m ? 'on' : ''}" data-act="mark" data-i="${i}" data-v="${m}" aria-pressed="${marks[i] === m}">${label}</button>`).join('');
+    body = `<h4 class="book-title">Door ${ROMAN[i]} <span class="gold">${Sprites.icon('coin', 2)} ${x.gold}</span></h4>
+      <p>${clue}</p>${lens}
+      ${rumours ? `<div class="rumours"><span class="muted small">Rumours</span>${rumours}</div>` : ''}
+      <div class="j-actions">${mk}</div>
+      <button class="pbtn ${chosen ? 'on' : 'gold'} choose-btn" data-act="pickDoor" data-i="${i}">${chosen ? `Door ${ROMAN[i]} is your choice` : `Choose Door ${ROMAN[i]}`}</button>`;
+  }
+  const nudge = !Object.keys(mine.known || {}).length && mine.flasks > 0 ? `<p class="book-nudge">You haven’t scanned a door yet. Walk up to one and ${window.matchMedia('(pointer: coarse)').matches ? 'tap' : 'press E for'} Scan.</p>` : '';
+  return `<div class="book">
+    <div class="ov-strip">${strip}</div>
+    <div class="ribbons">${ribbons}</div>
+    <div class="book-page">${nudge}${body}</div>
+    <p class="small muted book-oil">${Sprites.icon('flask', 2)} Oil ${mine.flasks}/${mine.flaskCap}</p>
+  </div>`;
+}
+
 /* ----- the journal: a page per door, your marks, rumours, and the plan ----- */
 const MARK_NAMES = { safe: 'Safe?', trap: 'Trap?', liar: 'Liar?' };
 function renderJournal() {
@@ -1006,29 +1140,6 @@ function renderJournal() {
 }
 
 /* ----- results ----- */
-function renderResults() {
-  const d = D();
-  const r = d.lastResult;
-  const lines = [];
-  if (r.dmTimedOut) lines.push('<p class="muted">The DM ran out of time, so the dungeon set itself up.</p>');
-  r.doors.forEach((x) => lines.push(`<p><span class="dn">${ROMAN[x.index]}</span>${esc(x.lines.join(' '))}</p>`));
-  r.rests.forEach((x) => lines.push(`<p>${esc(pname(x.id))} ${x.auto ? 'didn’t choose in time and rested' : 'rested by the fire'}${x.healed ? ` (+${x.healed} HP)` : ''}.</p>`));
-  r.haunts.forEach((x) => lines.push(`<p class="ghostname">${esc(pname(x.ghost))} haunted ${esc(pname(x.target))}${x.stolen ? ` and stole ${x.stolen} gold.` : ', who took no trap damage.'}</p>`));
-  r.deaths.forEach((x) => lines.push(`<p style="color:var(--blood)">${esc(pname(x.id))} died, dropped ${x.dropped} gold, and rose as a ghost.</p>`));
-  const last = d.round >= d.rounds || d.advs.every((a) => !a.alive);
-  const cont = isHost()
-    ? `<button class="pbtn gold" data-act="continue">${last ? 'Count the gold' : 'Next round'}</button>`
-    : `<span class="muted small">${esc(pname(S.hostId))} continues, or it moves on when time runs out.</span>`;
-  const playing = Scene.isPlaying();
-  return `<div class="win">
-    <div class="row" style="margin-bottom:12px">
-      ${playing ? '<button class="pbtn" data-act="skip">Skip</button>' : '<button class="pbtn" data-act="replay">Replay</button>'}
-      ${cont}
-    </div>
-    ${playing ? '<p class="muted" style="margin:0">The doors are opening…</p>' : `<div class="log">${lines.join('')}</div>`}
-  </div>${sayBox(myVoice(), false)}`;
-}
-
 /* ----- dungeon end ----- */
 function renderDungeonEnd() {
   const d = D();
@@ -1047,8 +1158,7 @@ function renderDungeonEnd() {
       <thead><tr><th>Player</th><th>Role</th><th class="num">Gold</th><th class="num">Score</th></tr></thead>
       <tbody>${rows}</tbody></table></div>
     <p class="muted small" style="margin-top:10px">Adventurer score = gold held × ${N} ÷ ${d.P} × 100. DM score = gold not held by adventurers ÷ ${d.P} × 100.</p>
-    ${isHost() ? `<button class="pbtn gold" data-act="continue">${lastD ? 'Final scores' : `Next dungeon (DM: ${esc(pname(S.match.dmOrder[S.match.dIndex + 1]))})`}</button>`
-      : `<span class="muted">Waiting for ${esc(pname(S.hostId))} to continue.</span>`}
+    ${lastD ? '' : `<p class="small muted" style="margin:0">Next DM: <b>${esc(pname(S.match.dmOrder[S.match.dIndex + 1]))}</b></p>`}
   </div>
   <div class="win"><div class="win-title">Match log <span class="muted">Every round so far, for tuning the game</span></div>${logButtons()}</div>`;
 }
@@ -1110,10 +1220,10 @@ function renderRules() {
     <p style="margin-top:10px">One player is the dungeon master. Everyone else is a greedy adventurer, out for themselves. Everyone takes one turn as DM. Highest total score wins.</p>
     <h3>Each round</h3>
     <ul>
-      <li>The DM hides gold behind the doors and buys traps with mana, their trap budget. The DM starts each dungeon with 8 mana banked, gets more every round, and keeps what they don’t spend. Every trap has an element.</li>
+      <li>The DM hides gold behind the doors and buys traps with mana, their trap budget. On the Traps screen, the DM taps a door in the room, drags the gold bar to share out the gold, taps trap cards to place them, and can add a fake clue. The DM starts each dungeon with 8 mana banked, gets more every round, and keeps what they don’t spend. Every trap has an element.</li>
       <li>Adventurers see each door’s gold. Its clue is hidden: walk up to a door and scan it with your lantern (one oil flask, 3 seconds, and only you see the result). A trapped door’s clue is its real element; an empty door is silent. The DM can pay for an illusion to fake either, and illusions fool scans too.</li>
       <li>You get oil each round (one fewer flask than there are doors) and can carry as many flasks as there are doors. The shopkeeper sells more. A Lens makes your next scan show the real trap and its strength.</li>
-      <li>Each adventurer secretly picks a door and how to go in, or rests by the fire (+10 HP). Then the doors open.</li>
+      <li>Each adventurer secretly picks a door and how to go in, or rests by the fire (+10 HP). Then the doors open one at a time. After a short pause to read what happened (or once everyone presses Ready), the next round starts on its own. The History screen keeps every round’s story.</li>
     </ul>
     <h3>Going in</h3>
     <ul>
@@ -1243,13 +1353,7 @@ document.addEventListener('input', (e) => {
   if (k === 'code') { ui.code = e.target.value.toUpperCase(); e.target.value = ui.code; }
 });
 document.addEventListener('keydown', (e) => {
-  const card = e.target.closest && e.target.closest('[data-drag]');
-  if (card && (e.key === 'Enter' || e.key === ' ') && building()) {
-    e.preventDefault();
-    const tool = toolFrom(card);
-    if (tool && tool.kind !== 'goldFrom') { ui.tool = ui.tool && JSON.stringify(ui.tool) === JSON.stringify(tool) ? null : tool; render(); }
-    return;
-  }
+
   if (e.key === 'Escape' && ui.rules) { ui.rules = false; render(); }
   else if (e.key === 'Escape' && ui.confirmLeave) { ui.confirmLeave = false; render(); }
   else if (e.key === 'Escape' && ui.sheet && !Tutorial.isOpen()) { ui.sheet = null; render(); }
@@ -1261,6 +1365,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && e.target.dataset.input === 'code') doJoin();
 });
 function sendWhisper(to, i, door) {
+  Room.flushPos();
   socket.emit('whisper', { to, i, door }, (r) => {
     if (!r || r.error) return toast((r && r.error) || 'Could not whisper.');
     Room.say(S.me, r.text, 'whisper');
@@ -1269,63 +1374,6 @@ function sendWhisper(to, i, door) {
     renderSheetOnly();
   });
 }
-
-/* ---------- drag and drop for the DM builder ---------- */
-const drag = { a: null };
-function toolFrom(el) {
-  const k = el.dataset.drag;
-  if (k === 'trap') return { kind: 'trap', tier: el.dataset.tier, element: el.dataset.element };
-  if (k === 'rune') return { kind: 'rune', rune: el.dataset.rune };
-  if (k === 'gold') return { kind: 'gold' };
-  if (k === 'erase') return { kind: 'erase' };
-  if (k === 'goldFrom') return { kind: 'goldFrom', from: Number(el.dataset.i) };
-  return null;
-}
-function building() { const d = D(); return S && S.phase === 'dm' && d && d.role === 'dm'; }
-document.addEventListener('pointerdown', (e) => {
-  const el = e.target.closest('[data-drag]');
-  if (!el || !building() || e.button > 0) return;
-  const tool = toolFrom(el);
-  if (!tool) return;
-  e.preventDefault();
-  drag.a = { tool, el, sx: e.clientX, sy: e.clientY, moved: false, ghost: null };
-});
-document.addEventListener('pointermove', (e) => {
-  const a = drag.a;
-  if (!a) return;
-  if (!a.moved && Math.hypot(e.clientX - a.sx, e.clientY - a.sy) < 6) return;
-  if (!a.moved) {
-    a.moved = true;
-    a.ghost = document.createElement('div');
-    a.ghost.className = 'drag-ghost';
-    a.ghost.innerHTML = a.tool.kind === 'goldFrom' ? `${Sprites.icon('coin', 3)} 10` : a.el.innerHTML;
-    document.body.appendChild(a.ghost);
-  }
-  a.ghost.style.left = e.clientX + 'px';
-  a.ghost.style.top = e.clientY + 'px';
-  Scene.dropHover(Scene.doorAt(e.clientX, e.clientY));
-});
-function endDrag(e, cancelled) {
-  const a = drag.a;
-  if (!a) return;
-  drag.a = null;
-  if (a.ghost) a.ghost.remove();
-  Scene.dropHover(-1);
-  if (cancelled || !building()) return;
-  const door = a.moved ? Scene.doorAt(e.clientX, e.clientY) : -1;
-  if (a.tool.kind === 'goldFrom') return moveGold(a.tool.from, door);
-  if (a.moved) {
-    if (door >= 0) applyTool(a.tool, door);
-    return;
-  }
-  // a tap picks the card up; tapping doors then places it
-  const same = ui.tool && JSON.stringify(ui.tool) === JSON.stringify(a.tool);
-  ui.tool = same ? null : a.tool;
-  Sound.play('click');
-  render();
-}
-document.addEventListener('pointerup', (e) => endDrag(e, false));
-document.addEventListener('pointercancel', (e) => endDrag(e, true));
 
 function doJoin() {
   if (!ui.name.trim()) return toast('Enter your name first.');
@@ -1376,10 +1424,15 @@ document.addEventListener('click', (e) => {
       ui.dm[i].gold = Math.max(cfg().MIN_DOOR_GOLD, ui.dm[i].gold + delta);
       Sound.play('coins', 1); sendDraft(); render(); break;
     }
-    case 'dmElTab': ui.dmEl = v; if (ui.tool && ui.tool.kind === 'trap') ui.tool.element = v; render(); break;
-    case 'dmDoor': if (ui.tool) applyTool(ui.tool, i); else toast('Drag a card onto this door, or tap a card first.'); break;
-    case 'dmClear': if (v === 'trap') ui.dm[i].tier = 'none'; else ui.dm[i].illusion = 'honest'; Sound.play('shove'); sendDraft(); render(); break;
-    case 'dmSpread': spreadGold(); break;
+    case 'dmElTab': ui.dmEl = v; render(); break;
+    case 'dmSel': ui.dmSel = i; render(); break;
+    case 'dmCard': dmApply((x) => { x.tier = v; x.element = ui.dmEl; }); Sound.play('place'); break;
+    case 'dmFake': dmApply((x) => { x.illusion = v; }); Sound.play('illusion'); break;
+    case 'dmClear': dmApply((x) => { x.tier = 'none'; x.illusion = 'honest'; }); Sound.play('shove'); break;
+    case 'dmEven': evenGold(); Sound.play('coins', 3); sendDraft(); render(); break;
+    case 'dmBait': baitGold(Math.min(ui.dmSel || 0, ui.dm.length - 1)); Sound.play('coins', 4); sendDraft(); render(); break;
+    case 'ready': sendReady(); break;
+    case 'page': ui.page = v === 'plan' ? 'plan' : Number(v); renderPanel(); Sound.play('click'); break;
     case 'say': {
       if (Date.now() < ui.sayUntil) break;
       ui.sayUntil = Date.now() + 2600;
@@ -1398,10 +1451,17 @@ document.addEventListener('click', (e) => {
     }
     case 'whisperDoor': sendWhisper(ui.whisperTo || Room.nearPeople()[0], ui.whisperPick, i); ui.whisperPick = null; break;
     case 'dmSubmit': socket.emit('dmSubmit', draftForServer(), (r) => { ack(r); if (r && r.ok) Sound.play('lockIn'); }); break;
-    case 'pickDoor': ui.adv.door = i; ui.adv.resting = false; sendPlanDraft(); render(); break;
+    case 'pickDoor': ui.adv.door = i; ui.adv.resting = false; ui.page = 'plan'; sendPlanDraft(); render(); break;
     case 'approach': ui.adv.approach = v; sendPlanDraft(); render(); break;
     case 'tog': ui.adv[v] = !ui.adv[v]; sendPlanDraft(); render(); break;
-    case 'sheet': ui.sheet = ui.sheet === v ? null : v; render(); break;
+    case 'sheet':
+      if (v === 'shop' && !(ui.near && ui.near.type === 'shop')) {
+        // the shop is a place: walk there
+        Room.walkTo({ x: (64 - 26) / 332, y: (346 - 118) / 248 });
+        toast('Walking to the shopkeeper…');
+        break;
+      }
+      ui.sheet = v; render(); Sound.play('click'); break;
     case 'sheetClose': ui.sheet = null; render(); break;
     case 'roomAct': roomAction(); break;
     case 'scanDoor': startScan(i); break;
