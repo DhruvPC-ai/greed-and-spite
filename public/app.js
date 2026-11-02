@@ -69,6 +69,7 @@ socket.on('state', (v) => {
   clockOffset = v.now - Date.now();
   store.set('gs_code', v.code);
   syncLocal();
+  syncFollowAndOffers();
   if (S.phase === 'lobby' && !store.get('gs_tut_seen') && !Tutorial.isOpen()) openTutorial(0);
   const sk = D() ? `${S.phase}:${S.match.dIndex}:${D().round}:${D().role}` : S.phase;
   if (sk !== ui.sheetKey) {
@@ -79,6 +80,7 @@ socket.on('state', (v) => {
     ui.readyAt = S.phase === 'dungeonEnd' ? Date.now() + SCORES_MS : null;
     ui.revealGuard = S.phase === 'results' ? Date.now() + 30000 : 0;
     if (S.phase !== 'adv') { ScanView.close(); Room.setMyScan(false); }
+    if (S.phase === 'adv' && D() && D().shortage) setTimeout(announceShortage, 600);
   }
   const need = needsMe() ? `${S.phase}:${S.match.dIndex}:${D().round}` : null;
   if (need && need !== lastNeed) Sound.play('yourTurn');
@@ -155,6 +157,8 @@ function roomAction() {
   else if (n.type === 'person') { ui.whisperTo = n.id; ui.whisperPick = null; openSheet('talk'); }
 }
 function chooseDoor(i) {
+  if (ui.adv.follow && followFrozen()) return toast(FROZEN_MSG());
+  leaveFollowing();
   ui.adv.door = i;
   ui.adv.resting = false;
   sendPlanDraft();
@@ -202,6 +206,8 @@ function doorIn(text) {
 }
 
 function restNow() {
+  if (ui.adv.follow && followFrozen()) return toast(FROZEN_MSG());
+  ui.adv.follow = '';
   ui.adv.door = null;
   ui.adv.resting = true;
   socket.emit('action', { type: 'rest' }, (r) => {
@@ -210,11 +216,54 @@ function restNow() {
   });
   render();
 }
+// in the last seconds of choosing nobody can start or stop following (the server enforces it)
+const msLeftNow = () => (S && S.deadline ? S.deadline - (Date.now() + clockOffset) : Infinity);
+const followFrozen = () => S && S.phase === 'adv' && msLeftNow() < cfg().FOLLOW_FREEZE_MS;
+const FROZEN_MSG = () => `Too late: nobody can start or stop following in the last ${cfg().FOLLOW_FREEZE} seconds.`;
+function planForServer() {
+  const a = ui.adv;
+  const items = { armour: a.armour, lock: a.lock, charm: a.charm || null, shove: a.shove || null };
+  if (a.follow) return { type: 'follow', leader: a.follow, ...items };
+  if (a.door === null) return null;
+  return { type: 'door', door: a.door, approach: a.approach, ...items };
+}
 // the plan as it stands counts if time runs out before you lock in
 function sendPlanDraft() {
   const a = ui.adv;
-  if (!a || a.door === null || !S || S.phase !== 'adv') return;
-  socket.emit('actionDraft', { type: 'door', door: a.door, approach: a.approach, armour: a.armour, lock: a.lock, charm: a.charm || null, shove: a.shove || null });
+  if (!a || !S || S.phase !== 'adv') return;
+  const plan = planForServer();
+  if (plan) socket.emit('actionDraft', plan);
+}
+// follow someone: copy their final door and speed when the doors open
+function followNow(leader) {
+  if (followFrozen()) return toast(FROZEN_MSG());
+  ui.adv.follow = leader;
+  ui.adv.door = null;
+  ui.adv.resting = false;
+  if (ui.adv.shove === leader) ui.adv.shove = '';
+  const plan = planForServer();
+  // if a plan is already locked in, following replaces it; otherwise it's the plan as it stands
+  if (D().mine.action) socket.emit('action', plan, (r) => { ack(r); if (r && r.ok) Sound.play('lockIn'); });
+  else socket.emit('actionDraft', plan);
+  Sound.play('click');
+  render();
+}
+// stop following before making another plan; true if that's allowed
+function leaveFollowing(cb) {
+  if (!ui.adv.follow) return cb && cb();
+  if (followFrozen()) { toast(FROZEN_MSG()); return; }
+  ui.adv.follow = '';
+  socket.emit('unfollow', null, (r) => { if (r && r.error) toast(r.error); });
+  if (cb) cb();
+}
+const SCARCE = { potion: 'Potions are', oil: 'Lamp oil is', armour: 'Armour is', charm: 'Charms are', lens: 'Lenses are', lock: 'Locks are', shove: 'Shoves are' };
+const shortageLine = (sh) => `${SCARCE[sh.item] || cap(sh.item) + ' is'} scarce today! ${sh.price} gold.`;
+// when the doors open, the shopkeeper calls out the DM's Shortage (the new price is public)
+function announceShortage() {
+  const d = D();
+  if (!d || !d.shortage || S.phase !== 'adv') return;
+  ui.merchantNext = Date.now() + 9000;
+  if (viewMode() === 'room') Room.say('merchant', shortageLine(d.shortage)); else Scene.say('merchant', shortageLine(d.shortage));
 }
 function merchantTalk() {
   const lines = (S && cfg().MESSAGES.merchant) || [];
@@ -285,12 +334,14 @@ function syncLocal() {
     ui.dmKey = key;
     ui.dm = Array.from({ length: d.doorsCount }, () => ({ gold: 0, tier: 'none', element: 'fire', illusion: 'honest' }));
     ui.dmSel = 0;
+    ui.dmShortage = '';
+    ui.bribe = { to: '', door: 0, amount: cfg().BRIBE_MIN, company: false };
     evenGold();
     sendDraft();
   }
   if (ui.advKey !== key) {
     ui.advKey = key;
-    ui.adv = { door: null, resting: false, approach: 'walk', armour: false, charm: '', lock: false, shove: '' };
+    ui.adv = { door: null, resting: false, approach: 'walk', armour: false, charm: '', lock: false, shove: '', follow: '' };
     ui.marks = {};
     ui.useLens = false;
     ui.whisperTo = null;
@@ -298,18 +349,34 @@ function syncLocal() {
     ui.whispers = [];
   }
 }
+function syncFollowAndOffers() {
+  const d = D();
+  if (!d || d.role !== 'adv' || S.phase !== 'adv' || !d.mine || !ui.adv) return;
+  const plan = d.mine.plan;
+  if (plan && plan.type === 'follow' && !ui.adv.follow && ui.adv.door === null && !ui.adv.resting) ui.adv.follow = plan.leader;
+  ui.offersSeen = ui.offersSeen || new Set();
+  for (const o of d.mine.offers || []) {
+    const key = `${S.match.dIndex}-${d.round}-${o.id}`;
+    if (ui.offersSeen.has(key)) continue;
+    ui.offersSeen.add(key);
+    if (!o.answer) { toast('The DM sent you a secret offer. Open Offers.'); Sound.play('coins', 2); }
+  }
+}
 function draftForServer() {
-  return { doors: ui.dm.map((x) => ({
-    gold: x.gold,
-    trap: x.tier === 'none' ? null : { tier: x.tier, element: x.element },
-    illusion: x.illusion === 'honest' ? null : x.illusion,
-  })) };
+  return {
+    doors: ui.dm.map((x) => ({
+      gold: x.gold,
+      trap: x.tier === 'none' ? null : { tier: x.tier, element: x.element },
+      illusion: x.illusion === 'honest' ? null : x.illusion,
+    })),
+    shortage: ui.dmShortage || null,
+  };
 }
 function sendDraft() { socket.emit('dmDraft', draftForServer()); }
 const goldLeft = () => D().budget - ui.dm.reduce((s, x) => s + x.gold, 0);
+// everything the DM's build costs from the purse: traps, fake clues and a Shortage
 function dmCost() {
-  const c = cfg();
-  return ui.dm.reduce((s, x) => s + (x.tier === 'none' ? 0 : c.TRAPS[x.tier].cost) + (x.illusion === 'honest' ? 0 : c.ILLUSION_COST), 0);
+  return ui.dm.reduce((s, x) => s + trapCost(x), 0) + (ui.dmShortage ? cfg().SHORTAGE_COST : 0);
 }
 
 /* ---------- timer ---------- */
@@ -514,7 +581,7 @@ function renderBar() {
   if (d && S.phase !== 'matchEnd') {
     chips += `<span class="chip">Dungeon <b>${m.dIndex + 1}</b>/${m.total}</span>`;
     if (d.round > 0) chips += `<span class="chip">Round <b>${d.round}</b>/${d.rounds}</span>`;
-    chips += `<span class="chip">Pot <b class="gold">${d.P}</b></span>`;
+    chips += `<span class="chip" title="All the bait gold in this dungeon. Scores are measured against it.">Treasure <b class="gold">${d.T}</b></span>`;
   }
   return `
     <span class="brand">Greed &amp; Spite</span>
@@ -574,7 +641,7 @@ function renderLeft() {
   if (!d) return '';
   const m = S.match;
   const order = [...m.dmOrder].sort((a, b) => m.totals[b] - m.totals[a]);
-  const totals = m.history.length ? `<div class="win scores-win"><div class="win-title">Match scores</div><table class="scores"><tbody>${order.map((id) => `<tr class="${id === S.me ? 'me' : ''}"><td>${esc(pname(id))}${(S.players.find((p) => p.id === id) || {}).left ? ' <span class="tag">Left</span>' : ''}</td><td class="num">${m.totals[id].toFixed(1)}</td></tr>`).join('')}</tbody></table></div>` : '';
+  const totals = m.history.length ? `<div class="win scores-win"><div class="win-title">Match scores</div><table class="scores"><tbody>${order.map((id) => `<tr class="${id === S.me ? 'me' : ''}"><td>${esc(pname(id))}${(S.players.find((p) => p.id === id) || {}).left ? ' <span class="tag">Left</span>' : ''}</td><td class="num ${m.totals[id] < 0 ? 'neg' : ''}">${fmtScore(m.totals[id])}</td></tr>`).join('')}</tbody></table></div>` : '';
   if (S.phase === 'matchEnd') return totals;
   return `
     <div class="win party-win">
@@ -607,8 +674,8 @@ function renderSetup() {
   const c = cfg();
   if (d.role === 'dm') {
     return `<div class="win">
-      <p>This dungeon has <b>${d.rounds}</b> rounds and <b>${d.doorsCount}</b> doors per round. The pot is <span class="gold">${d.P} gold</span>.</p>
-      <p class="muted" style="margin:0">Every coin the adventurers don’t hold at the end is yours, including what they spend in the shop. Each round you get gold to hide and mana for traps. Unspent mana carries over.</p>
+      <p>This dungeon has <b>${d.rounds}</b> rounds and <b>${d.doorsCount}</b> doors per round. The treasure is <span class="gold">${d.T} gold</span>: all the bait you’ll put on the doors.</p>
+      <p class="muted" style="margin:0">You score the treasure the adventurers don’t gain, and whatever they spend in the shop. Each round you get bait to place on the doors, and a secret trap purse for traps, fake clues and Shortages. Unspent purse carries over, but it isn’t score.</p>
     </div>`;
   }
   const mine = d.mine;
@@ -632,19 +699,22 @@ function renderShop() {
   const c = cfg();
   const mine = d.mine;
   const me = advOf(S.me);
+  const sh = d.shortage;
   const items = Object.entries(c.SHOP).map(([k, it]) => {
     const owned = k === 'potion' ? mine.potions : k === 'oil' ? `${mine.flasks} of ${mine.flaskCap}` : mine.inv[k];
-    return `<div class="item">
-      <div class="top"><span>${it.name}</span><span class="gold">${Sprites.icon('coin', 2)} ${it.cost}</span></div>
+    const scarce = sh && sh.item === k;
+    const price = scarce ? sh.price : it.cost;
+    return `<div class="item ${scarce ? 'scarce' : ''}" data-item="${k}">
+      <div class="top"><span>${it.name}${scarce ? ' <span class="ttag spite">Shortage</span>' : ''}</span><span class="gold price">${Sprites.icon('coin', 2)} ${scarce ? `<s class="was">${it.cost}</s> ` : ''}<b>${price}</b></span></div>
       <p>${it.text}</p>
       <div class="row">
-        <button class="pbtn sm" data-act="buy" data-item="${k}" ${me.gold < it.cost || (k === 'oil' && mine.flasks >= mine.flaskCap) ? 'disabled' : ''}>Buy</button>
+        <button class="pbtn sm" data-act="buy" data-item="${k}" ${me.gold < price || (k === 'oil' && mine.flasks >= mine.flaskCap) ? 'disabled' : ''}>Buy</button>
         <span class="muted small">You have ${owned}</span>
         ${k === 'potion' && mine.potions > 0 ? `<button class="pbtn sm" data-act="drink" ${me.hp >= c.START_HP ? 'disabled' : ''}>Drink</button>` : ''}
       </div>
     </div>`;
   }).join('');
-  return `<div class="shop-win"><div class="keeper-row"><span class="portrait">${Sprites.merchant(3)}</span><p class="small" style="margin:0">You have <span class="gold">${me.gold}</span> gold and ${me.hp} HP. Every item is single use. Gold you spend goes to the DM and no longer counts toward your score.</p></div><div class="items">${items}</div></div>`;
+  return `<div class="shop-win"><div class="keeper-row"><span class="portrait">${Sprites.merchant(3)}</span><p class="small" style="margin:0">${sh ? `<b class="spite-text">${esc(shortageLine(sh))}</b> ` : ''}You have <span class="gold">${me.gold}</span> gold and ${me.hp} HP. Every item is single use. Gold you spend lowers your gain, so it counts for the DM.</p></div><div class="items">${items}</div></div>`;
 }
 
 /* ----- action bar under the room ----- */
@@ -664,6 +734,9 @@ function renderHud() {
       let label = role === 'ghost' ? 'Float up to someone' : 'Walk up to something';
       if (n) label = n.type === 'shop' ? 'Shop' : n.type === 'fire' ? 'Rest by the fire' : n.type === 'door' ? `Door ${ROMAN[n.i]}` : `Whisper to ${esc(pname(n.id))}`;
       btns.push(`<button class="pbtn gold act-btn" data-act="roomAct" ${n && n.type !== 'door' ? '' : 'disabled'}>${label}</button>`);
+    }
+    if (role === 'adv' && d.mine && S.phase === 'adv' && d.mine.followed) {
+      btns.push(`<span class="follow-chip ${d.mine.followed}">${d.mine.followed === 'on' ? 'Someone is following you' : 'They stopped following you'}</span>`);
     }
     if (role === 'adv' && d.mine) {
       btns.push(`<span class="oil-chip" title="Oil for your lantern: one flask per scan">${Sprites.icon('flask', 2)} ${d.mine.flasks}/${d.mine.flaskCap}</span>`);
@@ -689,6 +762,8 @@ const TABS = {
   traps: { label: 'Traps', icon: () => Sprites.icon('spikes', 3) },
   story: { label: 'This round', icon: () => Sprites.icon('eye', 3) },
   scores: { label: 'Scores', icon: () => Sprites.icon('crown', 3) },
+  bribe: { label: 'Bribe', icon: () => Sprites.icon('coin', 3) },
+  offers: { label: 'Offers', icon: () => Sprites.icon('coin', 3) },
 };
 function tabsFor() {
   const d = D();
@@ -697,9 +772,10 @@ function tabsFor() {
   if (ph === 'matchEnd') return ['scores', 'menu'];
   if (ph === 'dungeonEnd') return ['scores', 'history', 'talk', 'menu'];
   if (ph === 'results') return ['story', 'history', 'talk', 'menu'];
-  if (role === 'dm') return ['traps', 'talk', 'history', 'menu'];
+  if (role === 'dm') return ['traps'].concat(['dm', 'adv'].includes(ph) ? ['bribe'] : [], ['talk', 'history', 'menu']);
   if (role === 'ghost') return (ph === 'adv' ? ['haunt'] : []).concat(['talk', 'history', 'menu']);
-  return (ph === 'setup' ? ['gear'] : []).concat(['journal', 'shop', 'talk', 'history', 'menu']);
+  const offers = ph === 'adv' && d.mine && d.mine.offers && d.mine.offers.length ? ['offers'] : [];
+  return (ph === 'setup' ? ['gear'] : []).concat(['journal'], offers, ['shop', 'talk', 'history', 'menu']);
 }
 function defaultTab() {
   const d = D();
@@ -719,6 +795,7 @@ function tabNeedsYou(t) {
   if (t === 'journal') return S.phase === 'adv' && d.mine && !d.mine.action;
   if (t === 'haunt') return S.phase === 'adv' && !d.ghostDone;
   if (t === 'traps') return S.phase === 'dm';
+  if (t === 'offers') return S.phase === 'adv' && d.mine && (d.mine.offers || []).some((o) => !o.answer);
   if (t === 'story' || t === 'scores') return ['results', 'dungeonEnd'].includes(S.phase) && !ui.readySent;
   return false;
 }
@@ -741,6 +818,8 @@ function renderTab() {
   else if (t === 'haunt') body = renderGhost();
   else if (t === 'traps') body = S.phase === 'dm' ? renderWorkshop() : S.phase === 'adv' ? renderDmSummary() : renderSetup();
   else if (t === 'story') body = renderStory();
+  else if (t === 'bribe') body = renderBribe();
+  else if (t === 'offers') body = renderOffers();
   else if (t === 'scores') body = S.phase === 'matchEnd' ? renderMatchEnd() + `<div class="win"><div class="win-title">Score by dungeon</div>${renderHistory()}</div>` : renderScoresTab();
   return `<div class="panel-inner"><h3 class="panel-head">${TABS[t] ? TABS[t].label : ''}</h3>${body}</div>`;
 }
@@ -755,8 +834,15 @@ function readyBox(nextLabel) {
 function storyHtml(r) {
   const lines = [];
   if (r.dmTimedOut) lines.push('<p class="muted">The DM ran out of time, so the dungeon set itself up.</p>');
+  if (r.shortage) lines.push(`<p class="muted">Shortage: ${esc(cfg().SHOP[r.shortage.item].name)} cost ${r.shortage.price} gold instead of ${r.shortage.was}.</p>`);
   r.doors.forEach((x) => lines.push(`<p><span class="dn">${ROMAN[x.index]}</span>${esc(x.lines.join(' '))}</p>`));
-  r.rests.forEach((x) => lines.push(`<p>${esc(pname(x.id))} ${x.auto ? 'didn’t choose in time and rested' : 'rested by the fire'}${x.healed ? ` (+${x.healed} HP)` : ''}.</p>`));
+  const restText = (x) => {
+    if (x.follow && x.why === 'rest') return `followed ${esc(pname(x.follow))} to the campfire and rested`;
+    if (x.follow && x.why === 'loop') return `was following in a circle, so rested by the fire`;
+    if (x.follow && x.why === 'gone') return `was following ${esc(pname(x.follow))}, who was gone, so rested by the fire`;
+    return x.auto ? 'didn’t choose in time and rested' : 'rested by the fire';
+  };
+  r.rests.forEach((x) => lines.push(`<p>${esc(pname(x.id))} ${restText(x)}${x.healed ? ` (+${x.healed} HP)` : ''}.</p>`));
   r.haunts.forEach((x) => lines.push(`<p class="ghostname">${esc(pname(x.ghost))} haunted ${esc(pname(x.target))}${x.stolen ? ` and stole ${x.stolen} gold.` : ', who took no trap damage.'}</p>`));
   r.deaths.forEach((x) => lines.push(`<p style="color:var(--blood)">${esc(pname(x.id))} died, dropped ${x.dropped} gold, and rose as a ghost.</p>`));
   return `<div class="log">${lines.join('')}</div>`;
@@ -866,14 +952,12 @@ function renderWorkshop() {
   const d = D();
   const c = cfg();
   const cost = dmCost();
-  const mana = d.dm.mana;
-  const spare = mana - cost;
+  const purse = d.dm.purse;
+  const spare = purse - cost;
   const sel = Math.min(ui.dmSel || 0, ui.dm.length - 1);
   const x = ui.dm[sel];
   const others = cost - trapCost(x);
-  const crystals = mana <= 40
-    ? Array.from({ length: mana }, (_, k) => `<i class="${k < spare ? 'lit' : ''}"></i>`).join('')
-    : `<span class="mana-fill"><b style="width:${Math.max(0, (spare / mana) * 100)}%"></b></span>`;
+  const coin = Sprites.icon('coin', 1);
   const bar = ui.dm.map((g, i) => `${i ? `<span class="gb-handle" data-h="${i - 1}" role="slider" aria-label="Move gold between door ${ROMAN[i - 1]} and door ${ROMAN[i]}" tabindex="0"></span>` : ''}<button class="gb-seg ${i === sel ? 'sel' : ''}" style="flex:${g.gold}" data-act="dmSel" data-i="${i}">${ROMAN[i]}: <b>${g.gold}</b></button>`).join('');
   const showsNow = x.illusion !== 'honest' ? x.illusion : x.tier === 'none' ? 'none' : x.element;
   const living = d.advs.filter((a) => a.alive && !a.left);
@@ -881,43 +965,94 @@ function renderWorkshop() {
   const tabs = EL.map((e) => `<button class="pbtn sm ${ui.dmEl === e ? 'on' : ''}" data-act="dmElTab" data-v="${e}" title="${hurts(e).length ? 'Hurts ' + hurts(e).join(', ') + ' more' : ''}">${Sprites.icon(e, 2)}${hurts(e).length ? '<span class="hurtdot"></span>' : ''}</button>`).join('');
   const cards = ['minor', 'major', 'deadly'].map((t) => {
     const tc = c.TRAPS[t];
-    const afford = others + tc.cost + (x.illusion === 'honest' ? 0 : c.ILLUSION_COST) <= mana;
+    const afford = others + tc.cost + (x.illusion === 'honest' ? 0 : c.ILLUSION_COST) <= purse;
     const on = x.tier === t && x.element === ui.dmEl;
     return `<button class="tcard el-${ui.dmEl} ${on ? 'on' : ''}" data-act="dmCard" data-v="${t}" ${afford || on ? '' : 'disabled'}>
-      <span class="tc-name">${tc.name}</span>${Sprites.icon(ui.dmEl, 3)}<span class="tc-dmg">${tc.dmg} dmg</span><span class="tc-cost">${Sprites.icon('mana', 1)} ${tc.cost}</span></button>`;
+      <span class="tc-name">${tc.name}</span>${Sprites.icon(ui.dmEl, 3)}<span class="tc-dmg">${tc.dmg} dmg</span><span class="tc-cost">${coin} ${tc.cost}</span></button>`;
   }).join('');
-  const fakeAfford = others + (x.tier === 'none' ? 0 : c.TRAPS[x.tier].cost) + c.ILLUSION_COST <= mana;
+  const fakeAfford = others + (x.tier === 'none' ? 0 : c.TRAPS[x.tier].cost) + c.ILLUSION_COST <= purse;
   const fakes = [['honest', 'Real clue'], ['none', 'Silent'], ['fire', 'Smoke'], ['water', 'Dripping'], ['earth', 'Rumbling'], ['air', 'Draft']]
     .map(([v, l]) => `<button class="pbtn sm ${x.illusion === v ? 'on' : ''}" data-act="dmFake" data-v="${v}" ${v === 'honest' || x.illusion === v || fakeAfford || x.illusion !== 'honest' ? '' : 'disabled'}>${v !== 'honest' && v !== 'none' ? Sprites.icon(v, 2) : ''}${l}</button>`).join('');
   const weakNote = living.length ? `<p class="small muted" style="margin:6px 0 0">Weak to it: ${EL.map((e) => hurts(e).length ? `<span class="el-${e}">${cap(e)}</span> ${hurts(e).join(', ')}` : '').filter(Boolean).join('; ') || 'nobody yet'}.</p>` : '';
+  const hidden = trapCost(x);
+  const shortAfford = cost - (ui.dmShortage ? c.SHORTAGE_COST : 0) + c.SHORTAGE_COST <= purse;
+  const shortBtns = [['', 'None']].concat(Object.entries(c.SHOP).map(([k, it]) => [k, it.name]))
+    .map(([k, l]) => `<button class="pbtn sm ${ui.dmShortage === k ? 'on' : ''}" data-act="dmShortage" data-v="${k}" ${k === '' || ui.dmShortage === k || ui.dmShortage || shortAfford ? '' : 'disabled'}>${l}${k ? ` <span class="muted">${c.SHOP[k].cost}→${c.SHOP[k].cost * c.SHORTAGE_MULT}</span>` : ''}</button>`).join('');
   return `<div class="workshop">
-    <div class="mana-row"><span class="crystals" aria-hidden="true">${crystals}</span><span><b>${spare}</b> of ${mana} mana left</span></div>
-    <p class="mana-note">Mana is your trap budget. ${d.dm.nextIncome ? `+${d.dm.nextIncome} next round; whatever you don’t spend carries over.` : 'Last round: spend it.'}</p>
-    <div class="ws-label">Gold: ${d.budget} to hide</div>
+    <div class="purse-row"><span class="purse-ico">${Sprites.icon('bag', 2)}</span><span class="purse-val">Purse: <b>${spare}</b> gold</span>${cost ? `<span class="muted small">${cost} of ${purse} in this build</span>` : ''}</div>
+    <p class="purse-note">Only you see your purse. What you build on a door is gold hidden behind it, for whoever survives. ${d.dm.nextIncome ? `+${d.dm.nextIncome} next round; unspent purse carries over but isn’t score.` : 'Last round: unspent purse is worth nothing.'}</p>
+    <div class="ws-label">Bait: ${d.budget} gold to place</div>
     <div class="goldbar" id="goldbar">${bar}</div>
     <p class="small muted" style="margin:4px 0 8px">Drag a line to move gold between doors. Every door keeps at least ${c.MIN_DOOR_GOLD}.</p>
     <div class="row"><button class="pbtn sm" data-act="dmEven">Even</button><button class="pbtn sm" data-act="dmBait">Bait: most on Door ${ROMAN[sel]}</button></div>
     <div class="ws-door">
       <div class="ws-label">Door ${ROMAN[sel]} <span class="muted">(tap a door to pick another)</span></div>
-      <p class="small" style="margin:0">${x.gold} gold. Trap: <b>${x.tier === 'none' ? 'none' : `${c.TRAPS[x.tier].name} ${cap(x.element)}`}</b>. Shows: <b class="el-${showsNow}">${SHORT[showsNow]}</b>${x.illusion !== 'honest' ? ' <span class="ttag spite">fake</span>' : ''}</p>
+      <p class="small" style="margin:0">${x.gold} gold${hidden ? ` <span class="hidden-gold">+${hidden} hidden</span>` : ''}. Trap: <b>${x.tier === 'none' ? 'none' : `${c.TRAPS[x.tier].name} ${cap(x.element)}`}</b>. Shows: <b class="el-${showsNow}">${SHORT[showsNow]}</b>${x.illusion !== 'honest' ? ' <span class="ttag spite">fake</span>' : ''}</p>
     </div>
-    <div class="ws-label">Your hand <span class="seg el-tabs-mini">${tabs}</span></div>
+    <div class="ws-label">Your hand <span class="muted hand-purse">${coin} ${spare} left</span> <span class="seg el-tabs-mini">${tabs}</span></div>
     <div class="tcards">${cards}</div>
     ${weakNote}
-    <div class="ws-label">Fake clue <span class="muted">(${Sprites.icon('mana', 1)} ${c.ILLUSION_COST})</span></div>
+    <div class="ws-label">Fake clue <span class="muted">(${coin} ${c.ILLUSION_COST})</span></div>
     <div class="seg fakes">${fakes}</div>
     <div class="row" style="margin-top:10px"><button class="pbtn sm quiet" data-act="dmClear">Clear Door ${ROMAN[sel]}</button></div>
+    <div class="ws-label">Shortage <span class="muted">(${coin} ${c.SHORTAGE_COST}: one item costs ×${c.SHORTAGE_MULT} this round)</span></div>
+    <div class="seg shortages">${shortBtns}</div>
     <button class="pbtn gold lockin" data-act="dmSubmit">Lock in the dungeon</button>
     <p class="small muted" style="margin:6px 0 0">If time runs out, whatever you’ve built is used.</p>
   </div>`;
+}
+/* ----- bribes: the DM's offers, and the adventurer's answer ----- */
+// how much the DM can still offer: the purse, less what the current build would cost
+const bribeRoom = () => { const d = D(); return d.dm.purse - (S.phase === 'dm' ? dmCost() : 0); };
+function renderBribe() {
+  const d = D();
+  const c = cfg();
+  const offers = d.dm.bribes || [];
+  const room = bribeRoom();
+  const closed = d.dm.bribesClosed || (S.phase === 'adv' && msLeftNow() < c.BRIBE_CUTOFF_MS);
+  const full = offers.length >= c.BRIBES_PER_ROUND;
+  const b = ui.bribe || (ui.bribe = { to: '', door: 0, amount: c.BRIBE_MIN, company: false });
+  if (b.amount > room) b.amount = Math.max(c.BRIBE_MIN, room);
+  const living = d.advs.filter((a) => a.alive && !a.left);
+  const status = (o) => o.outcome === 'paid' ? 'Paid' : o.answer === 'accepted' ? 'Accepted' : o.answer === 'declined' ? 'Declined (back in your purse)' : o.delivered ? 'Sent, no answer yet' : 'Arrives when the doors open';
+  const list = offers.length ? `<table class="scores bribe-list"><tbody>${offers.map((o) => `<tr><td>${esc(pname(o.to))}</td><td>Door ${ROMAN[o.door]}</td><td class="gold">${o.amount}</td><td class="small">${o.company ? 'with company' : ''}</td><td class="small bribe-status">${status(o)}</td></tr>`).join('')}</tbody></table>` : '<p class="muted small">No offers yet this round.</p>';
+  const can = !closed && !full && b.to && room >= c.BRIBE_MIN && b.amount <= room;
+  return `<div class="bribe-win">
+    <p class="small" style="margin-top:0">Secretly offer a living adventurer gold to go through a door. Only you and they will know. Up to ${c.BRIBES_PER_ROUND} a round, from ${c.BRIBE_MIN} gold.</p>
+    <div class="ws-label">Who</div>
+    <div class="seg">${living.map((a) => `<button class="pbtn sm ${b.to === a.id ? 'on' : ''}" data-act="bribeTo" data-id="${a.id}">${esc(pname(a.id))}</button>`).join('')}</div>
+    <div class="ws-label">Which door</div>
+    <div class="seg">${Array.from({ length: d.doorsCount }, (_, i) => `<button class="pbtn sm ${b.door === i ? 'on' : ''}" data-act="bribeDoor" data-i="${i}">Door ${ROMAN[i]}</button>`).join('')}</div>
+    <div class="ws-label">How much <span class="muted">(${room} in your purse${S.phase === 'dm' ? ' after this build' : ''})</span></div>
+    <div class="row bribe-amt"><button class="pbtn sm" data-act="bribeAmt" data-v="-5">−5</button><button class="pbtn sm" data-act="bribeAmt" data-v="-1">−1</button><b class="gold">${Sprites.icon('coin', 2)} ${b.amount}</b><button class="pbtn sm" data-act="bribeAmt" data-v="1">+1</button><button class="pbtn sm" data-act="bribeAmt" data-v="5">+5</button></div>
+    <button class="pbtn sm ${b.company ? 'on' : ''}" data-act="bribeCompany" aria-pressed="${b.company}" style="margin-top:8px">${b.company ? '☑' : '☐'} Only pays if at least one other adventurer goes in with them</button>
+    <button class="pbtn gold lockin" data-act="bribeSend" ${can ? '' : 'disabled'}>${b.to ? `Offer ${esc(pname(b.to))} ${b.amount} gold for Door ${ROMAN[b.door]}` : 'Pick an adventurer'}</button>
+    <p class="small muted" style="margin:6px 0 0">${closed ? `Bribes are closed: the last ${c.BRIBE_CUTOFF} seconds are frozen.` : full ? `That’s ${c.BRIBES_PER_ROUND} offers this round.` : room < c.BRIBE_MIN ? `Your purse has only ${Math.max(0, room)} gold left${S.phase === 'dm' ? ' after this build' : ''}; a bribe is at least ${c.BRIBE_MIN}.` : `The gold is set aside from your purse now and comes back if they decline, don’t go, or the condition isn’t met. ${S.phase === 'dm' ? 'Offers made now arrive when the doors open.' : 'It arrives at once.'}`}</p>
+    <div class="ws-label">This round’s offers</div>
+    ${list}
+  </div>`;
+}
+function renderOffers() {
+  const d = D();
+  const offers = (d.mine && d.mine.offers) || [];
+  if (!offers.length) return '<p class="muted">No offers.</p>';
+  return offers.map((o) => `<div class="win offer">
+    <p style="margin-top:0">The DM offers you <b class="gold">${o.amount} gold</b> to go through <b>Door ${ROMAN[o.door]}</b>.</p>
+    ${o.company ? '<p class="small">Only pays if at least one other adventurer goes in with you.</p>' : ''}
+    ${o.answer ? `<div class="note">You ${o.answer} it.${o.answer === 'accepted' ? ` You’re paid only if you go through Door ${ROMAN[o.door]}.` : ''}</div>`
+      : `<div class="row"><button class="pbtn gold" data-act="bribeYes" data-id="${o.id}">Accept</button><button class="pbtn" data-act="bribeNo" data-id="${o.id}">Decline</button></div>`}
+    <p class="muted small" style="margin:8px 0 0">Paid as you go in, before any trap. Accepting doesn’t bind you, and nobody else knows about this offer. You can scan Door ${ROMAN[o.door]} first.</p>
+  </div>`).join('');
 }
 function renderDmSummary() {
   const d = D();
   const c = cfg();
   const waiting = d.advs.filter((a) => !a.ready && !a.left).map((a) => esc(pname(a.id)));
-  const rows = (d.dm.doors || []).map((x, i) => `<tr><td><b>${ROMAN[i]}</b></td><td class="gold">${x.gold}</td><td>${x.trap ? `<span class="el-${x.trap.element}">${c.TRAPS[x.trap.tier].name} ${cap(x.trap.element)}</span>` : 'No trap'}</td><td>${x.illusion !== null ? `<span class="ttag spite">fake: ${SHORT[x.illusion]}</span>` : ''}</td></tr>`).join('');
+  const rows = (d.dm.doors || []).map((x, i) => `<tr><td><b>${ROMAN[i]}</b></td><td class="gold">${x.gold}${x.hidden ? ` <span class="hidden-gold">+${x.hidden}</span>` : ''}</td><td>${x.trap ? `<span class="el-${x.trap.element}">${c.TRAPS[x.trap.tier].name} ${cap(x.trap.element)}</span>` : 'No trap'}</td><td>${x.illusion !== null ? `<span class="ttag spite">fake: ${SHORT[x.illusion]}</span>` : ''}</td></tr>`).join('');
+  const sh = d.dm.shortage;
   return `<p style="margin-top:0">${waiting.length ? `Still choosing: ${waiting.join(', ')}.` : 'Everyone has chosen.'}</p>
     <table class="scores"><thead><tr><th>Door</th><th>Gold</th><th>Trap</th><th></th></tr></thead><tbody>${rows}</tbody></table>
+    <p class="small muted">Purse left: <b class="gold">${d.dm.purse}</b> gold.${sh ? ` Shortage: ${esc(c.SHOP[sh.item].name)} costs ${sh.price} this round.` : ''}</p>
     <p class="small muted">Watch the room: lantern beams show who is scanning which door.</p>`;
 }
 function dmApply(fn) {
@@ -925,10 +1060,10 @@ function dmApply(fn) {
   const x = ui.dm[Math.min(ui.dmSel || 0, ui.dm.length - 1)];
   const before = { ...x };
   fn(x);
-  if (dmCost() > d.dm.mana) {
+  if (dmCost() > d.dm.purse) {
     Object.assign(x, before);
     Sound.play('empty');
-    return toast('Not enough mana for that.');
+    return toast('Your purse can’t pay for that.');
   }
   sendDraft();
   render();
@@ -1030,13 +1165,37 @@ function renderAdventurer() {
   let locked = '';
   if (act) {
     if (act.type === 'rest') locked = 'Locked in: Rest.';
-    else {
+    else if (act.type === 'follow') {
+      const ex = [act.armour && 'Armour', act.lock && 'Lock', act.charm && `Charm (${cap(act.charm)})`, act.shove && `Shove ${pname(act.shove)}`].filter(Boolean);
+      locked = `Locked in: following ${pname(act.leader)}${ex.length ? ' with ' + ex.join(', ') : ''}.`;
+    } else {
       const ex = [act.armour && 'Armour', act.lock && 'Lock', act.charm && `Charm (${cap(act.charm)})`, act.shove && `Shove ${pname(act.shove)}`].filter(Boolean);
       locked = `Locked in: ${VERB[act.approach]} through door ${ROMAN[act.door]}${ex.length ? ' with ' + ex.join(', ') : ''}.`;
     }
   }
   const warnLine = sel ? elementWarning(sel.clue, mine.affinity) : '';
+  const frozen = followFrozen();
+  const followWarn = mine.followed === 'on' ? '<div class="note warn follow-warn" style="margin-top:0">Someone is following you.</div>'
+    : mine.followed === 'stopped' ? '<div class="note follow-warn stopped" style="margin-top:0">They stopped following you.</div>' : '';
+  const itemsHtml = items.length ? `<div class="win-title" style="margin-top:14px">Items</div><div class="seg">${items.join('')}</div>` : '';
+  if (a.follow) {
+    const lead = esc(pname(a.follow));
+    return `<div class="win">
+      ${followWarn}
+      ${steps([{ text: `Following ${lead}`, done: true }, { text: act ? 'Locked in' : 'Lock in', done: !!act }])}
+      <div class="note follow-mine" style="margin-top:0">You’re following ${lead}. When the doors open you copy their final door and speed (not their items). Nobody knows but you.</div>
+      ${itemsHtml}
+      ${act ? `<div class="note">${esc(locked)}</div>` : ''}
+      <div class="row" style="margin-top:14px">
+        <button class="pbtn gold" data-act="lockIn" ${act && act.type === 'follow' ? 'disabled' : ''}>${act && act.type === 'follow' ? 'Locked in' : `Lock in: follow ${lead}`}</button>
+        <button class="pbtn" data-act="unfollow" ${frozen ? 'disabled' : ''}>Stop following</button>
+      </div>
+      <p class="muted small" style="margin:12px 0 0">${frozen ? `Following is frozen for the last ${c.FOLLOW_FREEZE} seconds.` : `You can stop until the last ${c.FOLLOW_FREEZE} seconds. If ${lead} rests, you rest too.`}</p>
+    </div>`;
+  }
+  const followBtns = others.map((o) => `<button class="pbtn sm" data-act="follow" data-id="${o.id}" ${frozen ? 'disabled' : ''}>Follow ${esc(pname(o.id))}</button>`).join('');
   return `<div class="win">
+      ${followWarn}
       ${steps([
         { text: sel ? `Door ${ROMAN[a.door]}` : 'Pick a door', done: !!sel },
         { text: `${VERB[a.approach]}${sel ? '' : ' (pick how)'}`, done: !!sel && !!act },
@@ -1051,6 +1210,7 @@ function renderAdventurer() {
         <button class="pbtn gold" data-act="lockIn" ${sel ? '' : 'disabled'}>${sel ? `${VERB[a.approach]} through door ${ROMAN[a.door]}` : 'Pick a door first'}</button>
         <button class="pbtn" data-act="rest">Rest by the fire<span class="sub">+${c.REST_HEAL} HP, no gold</span></button>
       </div>
+      ${others.length ? `<div class="win-title" style="margin-top:14px">Or follow someone <span class="muted">their final door and speed, secretly</span></div><div class="seg follow-btns">${followBtns}</div>${frozen ? `<p class="muted small" style="margin:6px 0 0">Following is frozen for the last ${c.FOLLOW_FREEZE} seconds.</p>` : ''}` : ''}
       <p class="muted small" style="margin:12px 0 0">Only the first ones in spring the trap. A room needs ${c.ROOM_BAGS} bags to empty; with more, the gold is split by bags. If time runs out, the plan you’ve picked counts even if you didn’t lock it in. With no door picked, you rest.</p>
     </div>`;
 }
@@ -1148,21 +1308,25 @@ function renderDungeonEnd() {
   const rows = Object.entries(sc).sort((a, b) => b[1].score - a[1].score).map(([id, s]) => `
     <tr><td>${esc(pname(id))}</td>
     <td>${s.role === 'dm' ? 'DM' : s.alive ? 'Adventurer' : '<span class="ghostname">Ghost</span>'}${s.left ? ' <span class="tag">Left</span>' : ''}</td>
-    <td class="num">${s.held}</td>
-    <td class="num"><b>${s.score.toFixed(1)}</b></td></tr>`).join('');
+    <td class="num">${s.role === 'dm' ? '–' : s.held}</td>
+    <td class="num ${s.gain < 0 ? 'neg' : ''}">${s.role === 'dm' ? `${signed(s.gain)} kept` : signed(s.gain)}</td>
+    <td class="num ${s.score < 0 ? 'neg' : ''}"><b>${fmtScore(s.score)}</b></td></tr>`).join('');
   const lastD = S.match.dIndex + 1 >= S.match.total;
   return `${renderAwards(d)}<div class="win">
     ${d.endedEarly ? `<div class="note warn" style="margin-top:0">${d.endedEarly === 'dmLeft' ? 'The DM left, so this dungeon ended early. Scores count only the gold that was in play.' : 'Too few players are left, so this dungeon ended early.'}</div>` : ''}
-    <div class="win-title">Dungeon scores <span class="muted">Pot ${d.P} gold</span></div>
+    <div class="win-title">Dungeon scores <span class="muted">Treasure ${d.T} gold</span></div>
     <div class="tablewrap"><table class="scores">
-      <thead><tr><th>Player</th><th>Role</th><th class="num">Gold</th><th class="num">Score</th></tr></thead>
+      <thead><tr><th>Player</th><th>Role</th><th class="num">Gold</th><th class="num">Gain</th><th class="num">Score</th></tr></thead>
       <tbody>${rows}</tbody></table></div>
-    <p class="muted small" style="margin-top:10px">Adventurer score = gold held × ${N} ÷ ${d.P} × 100. DM score = gold not held by adventurers ÷ ${d.P} × 100.</p>
+    <p class="muted small" style="margin-top:10px">Gain = gold held now − ${cfg().START_GOLD} starting gold. Adventurer score = gain × ${N} ÷ ${d.T} × 100. DM score = (${d.T} − the adventurers’ gains) ÷ ${d.T} × 100.</p>
     ${lastD ? '' : `<p class="small muted" style="margin:0">Next DM: <b>${esc(pname(S.match.dmOrder[S.match.dIndex + 1]))}</b></p>`}
   </div>
   <div class="win"><div class="win-title">Match log <span class="muted">Every round so far, for tuning the game</span></div>${logButtons()}</div>`;
 }
 
+// scores and gains can be negative; show a real minus sign
+const signed = (n) => (n > 0 ? '+' + n : n < 0 ? '−' + Math.abs(n) : '0');
+const fmtScore = (n) => (n < 0 ? '−' + Math.abs(n).toFixed(1) : n.toFixed(1));
 const AWARD_ICON = { greediest: 'coin', canary: 'heart', spiteful: 'lock', daredevil: 'fire', coward: 'zz', untouchable: 'crown', trapmaster: 'skull', scout: 'eye' };
 function renderAwards(d) {
   if (!d.awards || !d.awards.length) return '';
@@ -1189,7 +1353,7 @@ function renderHistory() {
   const sorted = [...m.dmOrder].sort((a, b) => m.totals[b] - m.totals[a]);
   return `<div class="tablewrap"><table class="scores">
     <thead><tr><th>Player</th>${m.history.map((h, i) => `<th class="num" title="DM: ${esc(pname(h.dmId))}">${ROMAN[i] || i + 1}</th>`).join('')}</tr></thead>
-    <tbody>${sorted.map((id) => `<tr><td>${esc(pname(id))}</td>${m.history.map((h) => `<td class="num ${h.dmId === id ? 'gold' : ''}">${h.scores[id] ? h.scores[id].score.toFixed(1) : '–'}</td>`).join('')}</tr>`).join('')}</tbody>
+    <tbody>${sorted.map((id) => `<tr><td>${esc(pname(id))}</td>${m.history.map((h) => `<td class="num ${h.dmId === id ? 'gold' : ''}">${h.scores[id] ? fmtScore(h.scores[id].score) : '–'}</td>`).join('')}</tr>`).join('')}</tbody>
   </table></div><p class="muted small" style="margin-top:8px">Gold numbers are the dungeon each player ran as DM.</p>`;
 }
 function renderMatchEnd() {
@@ -1206,7 +1370,7 @@ function renderMatchEnd() {
     <div class="winner">${names} ${winners.length > 1 ? 'share the hoard' : 'takes the hoard'}</div>
     <div class="tablewrap"><table class="scores">
       <thead><tr><th>Rank</th><th>Player</th><th class="num">Total</th></tr></thead>
-      <tbody>${sorted.map((id) => `<tr><td>${leftIds.includes(id) ? '–' : place(id)}</td><td>${esc(pname(id))}${leftIds.includes(id) ? ' <span class="tag">Left</span>' : ''}</td><td class="num"><b>${m.totals[id].toFixed(1)}</b></td></tr>`).join('')}</tbody>
+      <tbody>${sorted.map((id) => `<tr><td>${leftIds.includes(id) ? '–' : place(id)}</td><td>${esc(pname(id))}${leftIds.includes(id) ? ' <span class="tag">Left</span>' : ''}</td><td class="num ${m.totals[id] < 0 ? 'neg' : ''}"><b>${fmtScore(m.totals[id])}</b></td></tr>`).join('')}</tbody>
     </table></div>
     <div style="margin-top:14px">${isHost() ? '<button class="pbtn gold" data-act="toLobby">Back to the lobby</button>' : `<span class="muted">${esc(pname(S.hostId))} can take everyone back to the lobby.</span>`}</div>
   </div>
@@ -1215,35 +1379,62 @@ function renderMatchEnd() {
 
 /* ----- rules ----- */
 function renderRules() {
+  if (!S || !S.config) return ''; // the rules are only offered in the lobby and the game, once the server's config has arrived
+  const c = cfg();
+  const price = (k) => c.SHOP[k].cost;
   return `<div class="modal" data-act="closeRules"><div class="win" role="dialog" aria-label="How to play" data-stop="1">
     <div class="row" style="justify-content:space-between"><h2>How to play</h2><button class="pbtn sm" data-act="closeRules">Close</button></div>
     <p style="margin-top:10px">One player is the dungeon master. Everyone else is a greedy adventurer, out for themselves. Everyone takes one turn as DM. Highest total score wins.</p>
+    <h3>The DM’s gold</h3>
+    <ul>
+      <li>Bait: each round the DM places that round’s bait on the doors, at least ${c.MIN_DOOR_GOLD} per door in steps of ${c.GOLD_STEP}. Everyone sees it. Bait per door grows from ${c.BAIT_FIRST} in the first round to ${c.BAIT_LAST} in the last. The dungeon’s treasure is all its bait.</li>
+      <li>The trap purse: a working budget only the DM sees, topped up every round. It buys traps (${['minor', 'major', 'deadly'].map((t) => `${c.TRAPS[t].name} ${c.TRAPS[t].dmg} damage for ${c.TRAPS[t].cost} gold`).join(', ')}; every trap has an element), fake clues (${c.ILLUSION_COST}), a Shortage (${c.SHORTAGE_COST}) and bribes. Unspent purse carries over to the next round, but it is worth nothing at the end and isn’t score.</li>
+      <li>Made of gold: what the DM builds on a door is gold hidden behind it. Whoever survives the door takes the bait and the hidden gold, split by bags. The reveal shows each door’s hidden gold.</li>
+      <li>Shortage: while setting traps, the DM can make one shop item cost ×${c.SHORTAGE_MULT} for the round. The shopkeeper announces it when the doors open; prices go back to normal next round.</li>
+      <li>On the Traps screen the DM taps a door in the room, drags the gold bar to share out the bait, taps trap cards to place them, and can add a fake clue or a Shortage.</li>
+    </ul>
     <h3>Each round</h3>
     <ul>
-      <li>The DM hides gold behind the doors and buys traps with mana, their trap budget. On the Traps screen, the DM taps a door in the room, drags the gold bar to share out the gold, taps trap cards to place them, and can add a fake clue. The DM starts each dungeon with 8 mana banked, gets more every round, and keeps what they don’t spend. Every trap has an element.</li>
-      <li>Adventurers see each door’s gold. Its clue is hidden: walk up to a door and scan it with your lantern (one oil flask, 3 seconds, and only you see the result). A trapped door’s clue is its real element; an empty door is silent. The DM can pay for an illusion to fake either, and illusions fool scans too.</li>
+      <li>Adventurers see each door’s gold. Its clue is hidden: walk up to a door and scan it with your lantern (one oil flask, 3 seconds, and only you see the result). A trapped door’s clue is its real element; an empty door is silent. A fake clue fakes either, and fools scans too.</li>
       <li>You get oil each round (one fewer flask than there are doors) and can carry as many flasks as there are doors. The shopkeeper sells more. A Lens makes your next scan show the real trap and its strength.</li>
-      <li>Each adventurer secretly picks a door and how to go in, or rests by the fire (+10 HP). Then the doors open one at a time. After a short pause to read what happened (or once everyone presses Ready), the next round starts on its own. The History screen keeps every round’s story.</li>
+      <li>Each adventurer secretly picks a door and how to go in, follows someone, or rests by the fire (+${c.REST_HEAL} HP). If time runs out, the plan you’ve picked counts even if you didn’t lock it in. Then the doors open one at a time, and after a short pause the next round starts on its own. History keeps every round’s story.</li>
+      <li>While the shop is open, you see other players’ gold and HP as they were when the DM started setting traps, so nobody can spot what you bought or drank. Real values show when the doors open.</li>
     </ul>
     <h3>Going in</h3>
     <ul>
       <li>Sprint: 3 bags, ×1.5 damage if first in. Walk: 2 bags, ×1. Sneak: 1 bag, ×0.5.</li>
       <li>Only the fastest group into a room springs the trap. Anyone slower behind them is safe.</li>
-      <li>A room needs 3 bags to empty. With more than 3 bags, gold splits by bags. With fewer, the rest stays with the DM.</li>
+      <li>A room needs ${c.ROOM_BAGS} bags to empty. With more, the gold (bait and hidden) splits by bags. With fewer, the rest stays with the DM.</li>
+    </ul>
+    <h3>Following</h3>
+    <ul>
+      <li>Instead of picking a door, you can secretly follow another living adventurer. When the doors open you copy their final door and speed (not their items), so you arrive with them and share their fate. If they rest, you rest.</li>
+      <li>Chains work: if you follow Ann and Ann follows Ben, you end up wherever Ben goes. A loop, or a leader who left, means you rest.</li>
+      <li>The leader is told only that someone is following them, never who or how many, and when they stop. In the last ${c.FOLLOW_FREEZE} seconds nobody can start or stop following.</li>
+      <li>You can’t shove anyone along your following link, up or down the chain: the Shove fizzles and you keep it. A Lock still locks out followers.</li>
+    </ul>
+    <h3>Bribes</h3>
+    <ul>
+      <li>The DM can secretly offer a living adventurer gold to go through a door, up to ${c.BRIBES_PER_ROUND} offers a round, from ${c.BRIBE_MIN} gold, until ${c.BRIBE_CUTOFF} seconds before choosing ends. The DM can add “only if someone goes in with you”.</li>
+      <li>Only the DM and that adventurer know. Offers made while the DM sets traps arrive when the doors open. You can accept or decline, but accepting doesn’t bind you.</li>
+      <li>The gold comes out of the purse when it’s offered. It is paid as you go through the door, before any trap; it goes back to the purse if you decline, don’t go, are locked out, or the condition isn’t met.</li>
     </ul>
     <h3>Elements</h3>
     <p>Your element halves damage from that element and adds 50% from the one that beats it. Water beats Fire, Fire beats Air, Air beats Earth, Earth beats Water. Doors show a Weak or Resist badge for you, so you don’t need to remember this.</p>
-    <h3>Items (single use; the shop is open while the DM sets traps and while you choose)</h3>
+    <h3>Items</h3>
+    <p class="small muted" style="margin-top:0">Single use. The shop is open while the DM sets traps and while you choose. Shove ${price('shove')}, Oil ${price('oil')}, Charm ${price('charm')}, Potion ${price('potion')}, Lens ${price('lens')}, Armour ${price('armour')}, Lock ${price('lock')}.</p>
     <ul>
       <li>Potion: +40 HP. Armour: half damage this round. Charm: resist one element this round.</li>
-      <li>Oil flask: one more scan. Lens: your next scan shows the real trap, even through an illusion.</li>
-      <li>Lock: you enter alone and take all the gold; anyone else on that door is locked out. You take ×2.5 damage.</li>
-      <li>Shove: if your target picks your door, they spring the trap alone at ×1.5. Two shoves on each other: both go in.</li>
+      <li>Oil flask: one more scan. Lens: your next scan shows the real trap, even through a fake clue.</li>
+      <li>Lock: you enter alone and take all the gold; anyone else on that door is locked out. You take ×${c.LOCK_MULT} damage.</li>
+      <li>Shove: if your target picks your door, they spring the trap alone at ×1.5, and you pickpocket ${Math.round(c.PICKPOCKET * 100)}% of their gold after the loot. Two shoves on each other: both go in. A Lock on that door beats a Shove.</li>
     </ul>
     <h3>Death and ghosts</h3>
     <p>At 0 HP you drop half your gold and become a ghost. Ghosts see every trap and secretly haunt one adventurer each round. If a trap hurts that adventurer, the ghost steals 25% of their gold.</p>
+    <h3>What happens at each door, in order</h3>
+    <p>Bribes are paid, then trap damage, then the loot (anyone killed gets none), then pickpocketing, then haunts, then deaths drop half their gold.</p>
     <h3>Scoring</h3>
-    <p>Every coin ends with an adventurer or the DM; gold spent in the shop goes to the DM. Adventurer score = gold held × number of adventurers ÷ pot × 100. DM score = gold not held by adventurers ÷ pot × 100. If the adventurers end up holding half the pot between them, the DM ties the average adventurer.</p>
+    <p>Your ${c.START_GOLD} starting gold is pocket money: it buys things but doesn’t score. Your gain = gold held at the end − ${c.START_GOLD}, and it can be negative. Adventurer score = gain × number of adventurers ÷ treasure × 100. DM score = (treasure − all the adventurers’ gains) ÷ treasure × 100, so gold spent in the shop counts for the DM, and bribes paid count against them. If the adventurers gain half the treasure between them, the DM ties the average adventurer.</p>
   </div></div>`;
 }
 
@@ -1275,7 +1466,7 @@ function formatLog(log) {
   L(`Started ${new Date(log.started).toLocaleString()}${log.finished ? `, finished ${new Date(log.finished).toLocaleString()}` : ''}`);
   L(`Players: ${log.players.join(', ')}`);
   L(`Settings: ${log.settings.rounds} rounds per dungeon, ${log.settings.pace} pace`);
-  L(`Rules: ${log.config.startHp} HP and ${log.config.startGold} gold to start. Traps: ${Object.values(log.config.traps).map((t) => `${t.name} ${t.dmg} dmg for ${t.cost} mana`).join(', ')}. Illusion ${log.config.illusionCost} mana.`);
+  L(`Rules: ${log.config.startHp} HP and ${log.config.startGold} gold to start. Traps (from the DM's purse): ${Object.values(log.config.traps).map((t) => `${t.name} ${t.dmg} dmg for ${t.cost} gold`).join(', ')}. Fake clue ${log.config.illusionCost} gold. Shortage ${log.config.shortageCost} gold (x${log.config.shortageMult} price). Pickpocket ${Math.round((log.config.pickpocket || 0) * 100)}%.`);
   L(`Shop: ${Object.entries(log.config.shop).map(([k, v]) => `${k} ${v}`).join(', ')}`);
   if (log.totals) {
     L();
@@ -1285,7 +1476,8 @@ function formatLog(log) {
   for (const dg of log.dungeons) {
     L();
     L('='.repeat(60));
-    L(`DUNGEON ${dg.dungeon}   DM: ${dg.dm}   Pot: ${dg.pot} gold   Doors per round: ${dg.doorsPerRound}`);
+    const T = dg.treasury;
+    L(`DUNGEON ${dg.dungeon}   DM: ${dg.dm}   Treasury: ${T} gold   Doors per round: ${dg.doorsPerRound}`);
     L(`Adventurers: ${dg.adventurers.map((n) => `${n}${dg.affinities[n] ? ` (${dg.affinities[n]})` : ''}`).join(', ')}`);
     const choices = dg.rounds.flatMap((r) => (r.choices || []).map((c) => c.choice));
     const traps = dg.rounds.flatMap((r) => r.doors.filter((x) => x.trap).map((x) => x.trap.split(' ')[0]));
@@ -1293,25 +1485,48 @@ function formatLog(log) {
     const sprung = dg.rounds.reduce((s, r) => s + (r.outcome || []).filter((o) => o.sprangTrap.length).length, 0);
     const bought = dg.shop.filter((e) => e.bought);
     const deaths = dg.rounds.reduce((s, r) => s + (r.deaths || []).length, 0);
+    const purseSpent = dg.rounds.reduce((s, r) => s + (r.purseSpent || 0), 0);
+    const purseTotal = dg.rounds.reduce((s, r) => s + (r.purseIncome || 0), 0);
+    const hiddenTotal = dg.rounds.reduce((s, r) => s + r.doors.reduce((t, x) => t + (x.hiddenGold || 0), 0), 0);
+    const pockets = dg.rounds.flatMap((r) => r.pickpockets || []);
+    const shortages = dg.rounds.filter((r) => r.shortage).map((r) => `${r.shortage.item} (round ${r.round})`);
+    const allBribes = dg.rounds.flatMap((r) => r.bribes || []);
+    const follows = dg.rounds.flatMap((r) => (r.choices || []).filter((c) => c.following));
     L();
     L('Summary');
     if (dg.scores) {
       const adv = Object.values(dg.scores).filter((x) => x.role === 'adv');
-      const held = adv.reduce((s, x) => s + x.goldHeld, 0);
+      const gained = adv.reduce((s, x) => s + x.gain, 0);
       const dm = Object.values(dg.scores).find((x) => x.role === 'dm');
-      L(`  Adventurers ended holding ${held} of ${dg.pot} gold (${Math.round((held / dg.pot) * 100)}%).`);
+      if (dg.endedEarly) L(`  Ended early (${dg.endedEarly}); treasury so far ${dg.treasury} gold.`);
+      L(`  Adventurers gained ${gained} of the ${T} gold treasury (${T ? Math.round((gained / T) * 100) : 0}%); the DM kept ${T - gained}.`);
       L(`  DM score ${dm.score.toFixed(1)}; adventurer average ${(adv.reduce((s, x) => s + x.score, 0) / adv.length).toFixed(1)}, best ${Math.max(...adv.map((x) => x.score)).toFixed(1)}.`);
     }
     L(`  Choices: ${count(choices)}`);
     L(`  Items bought: ${count(bought.map((e) => e.bought))} (${bought.reduce((s, e) => s + e.cost, 0)} gold spent)`);
     L(`  Traps placed: ${count(traps)}; illusions ${illusions}; traps sprung ${sprung}; deaths ${deaths}`);
+    const bribesPaid = allBribes.filter((b) => b.outcome === 'paid');
+    const lastRound = dg.rounds[dg.rounds.length - 1];
+    const unspent = lastRound ? (lastRound.purseEnd !== undefined ? lastRound.purseEnd : lastRound.purseLeft) : 0;
+    L(`  DM purse: received ${purseTotal}; built ${purseSpent} into traps, fake clues and Shortages (${hiddenTotal} of it hidden gold behind doors); paid ${bribesPaid.reduce((s, b) => s + b.amount, 0)} in bribes; ${unspent} unspent at the end (worth nothing)`);
+    L(`  Shortages: ${shortages.join(', ') || 'none'}`);
+    L(`  Bribes: ${allBribes.length} offered, ${allBribes.filter((b) => b.answer === 'accepted').length} accepted, ${allBribes.filter((b) => b.answer === 'declined').length} declined, ${bribesPaid.length} paid`);
+    L(`  Following: ${follows.length} follow plans; ${follows.filter((c) => c.door).length} went through a door, ${follows.filter((c) => !c.door).length} rested`);
+    L(`  Pickpockets: ${pockets.length ? pockets.map((x) => `${x.shover} took ${x.stolen} from ${x.target}`).join(', ') : 'none'}`);
     for (const r of dg.rounds) {
       L();
-      L(`Round ${r.round}   ${r.goldBudget} gold to hide, DM had ${r.manaAvailable} mana and spent ${r.manaSpent}${r.dmTimedOut ? ' (DM timed out)' : ''}`);
-      r.doors.forEach((x) => L(`  Door ${x.door}: ${x.gold} gold, ${x.trap ? x.trap + ' trap' : 'no trap'}, clue shown: ${x.clueShown}${x.illusion !== null ? ' (illusion)' : ''}`));
+      L(`Round ${r.round}   ${r.bait} bait gold placed${r.dmTimedOut ? ' (DM timed out)' : ''}`);
+      const pStart = r.purseStart !== undefined ? r.purseStart : r.purseAvailable;
+      L(`  DM purse: ${pStart} at the start (+${r.purseIncome} this round); built ${r.purseSpent}; bribes paid ${r.bribesPaid || 0}; ${r.purseEnd !== undefined ? r.purseEnd : r.purseLeft} left after the round`);
+      if (r.shortage) L(`  Shortage: ${r.shortage.item} ${r.shortage.normal} -> ${r.shortage.price} gold (cost the DM ${r.shortage.cost})`);
+      r.doors.forEach((x) => L(`  Door ${x.door}: ${x.gold} gold + ${x.hiddenGold || 0} hidden, ${x.trap ? x.trap + ' trap' : 'no trap'}, clue shown: ${x.clueShown}${x.illusion !== null ? ' (illusion)' : ''}`));
       if (r.choices) {
         L('  Choices:');
-        r.choices.forEach((c) => L(`    ${c.player}: ${c.choice}${c.door ? ` into door ${c.door}` : ''}${c.items && c.items.length ? ` [${c.items.join(', ')}]` : ''}`));
+        r.choices.forEach((c) => L(`    ${c.player}: ${c.choice}${c.door ? ` into door ${c.door}` : ''}${c.following ? ` (following ${c.following}${c.why ? `: ${c.why}` : ''})` : ''}${c.items && c.items.length ? ` [${c.items.join(', ')}]` : ''}`));
+        if (r.bribes && r.bribes.length) {
+          L('  Bribes:');
+          r.bribes.forEach((b) => L(`    ${b.amount} gold to ${b.to} for door ${b.door}${b.company ? ' (only with company)' : ''}, offered ${b.offered}; ${b.answer}; ${b.outcome}`));
+        }
         L('  What happened:');
         r.outcome.forEach((o) => L(`    ${o.door}: ${o.story}`));
         r.haunts.forEach((h) => L(`    Ghost ${h.ghost} haunted ${h.target}${h.stolen ? ` and stole ${h.stolen}` : ' (no damage, nothing stolen)'}`));
@@ -1326,7 +1541,9 @@ function formatLog(log) {
     if (dg.scores) {
       L();
       L('Scores');
-      Object.entries(dg.scores).sort((x, y) => y[1].score - x[1].score).forEach(([n, v]) => L(`  ${n.padEnd(16)} ${v.role === 'dm' ? 'DM ' : 'adv'}  ${String(v.goldHeld).padStart(5)} gold  ${v.score.toFixed(1)}`));
+      Object.entries(dg.scores).sort((x, y) => y[1].score - x[1].score).forEach(([n, v]) => L(v.role === 'dm'
+        ? `  ${n.padEnd(16)} DM   kept ${String(v.treasuryKept).padStart(5)} of ${T}         score ${v.score.toFixed(1).padStart(6)}`
+        : `  ${n.padEnd(16)} adv  held ${String(v.goldHeld).padStart(5)}, gain ${String(v.gain).padStart(5)}  score ${v.score.toFixed(1).padStart(6)}`));
     }
     if (dg.awards && dg.awards.length) {
       L();
@@ -1337,7 +1554,7 @@ function formatLog(log) {
   return out.join('\n') + '\n';
 }
 function shopLine(e) {
-  if (e.bought) return `${e.player} bought ${e.bought} (${e.cost})`;
+  if (e.bought) return `${e.player} bought ${e.bought} (${e.cost}${e.shortage ? ', Shortage price' : ''})`;
   if (e.drank) return `${e.player} drank a potion (${e.hpBefore} to ${e.hpAfter} HP)`;
   if (e.usedLens) return `${e.player} used a lens on door ${e.usedLens} and saw ${e.saw}`;
   if (e.scanned) return `${e.player} scanned door ${e.scanned}${e.lens ? ' with a Lens' : ''} and saw ${e.saw}`;
@@ -1429,6 +1646,15 @@ document.addEventListener('click', (e) => {
     case 'dmCard': dmApply((x) => { x.tier = v; x.element = ui.dmEl; }); Sound.play('place'); break;
     case 'dmFake': dmApply((x) => { x.illusion = v; }); Sound.play('illusion'); break;
     case 'dmClear': dmApply((x) => { x.tier = 'none'; x.illusion = 'honest'; }); Sound.play('shove'); break;
+    case 'dmShortage': {
+      const was = ui.dmShortage;
+      ui.dmShortage = v || '';
+      if (dmCost() > D().dm.purse) { ui.dmShortage = was; Sound.play('empty'); toast('Your purse can’t pay for that.'); break; }
+      Sound.play('coins', 1);
+      sendDraft();
+      render();
+      break;
+    }
     case 'dmEven': evenGold(); Sound.play('coins', 3); sendDraft(); render(); break;
     case 'dmBait': baitGold(Math.min(ui.dmSel || 0, ui.dm.length - 1)); Sound.play('coins', 4); sendDraft(); render(); break;
     case 'ready': sendReady(); break;
@@ -1451,7 +1677,27 @@ document.addEventListener('click', (e) => {
     }
     case 'whisperDoor': sendWhisper(ui.whisperTo || Room.nearPeople()[0], ui.whisperPick, i); ui.whisperPick = null; break;
     case 'dmSubmit': socket.emit('dmSubmit', draftForServer(), (r) => { ack(r); if (r && r.ok) Sound.play('lockIn'); }); break;
-    case 'pickDoor': ui.adv.door = i; ui.adv.resting = false; ui.page = 'plan'; sendPlanDraft(); render(); break;
+    case 'pickDoor':
+      if (ui.adv.follow && followFrozen()) { toast(FROZEN_MSG()); break; }
+      leaveFollowing();
+      ui.adv.door = i; ui.adv.resting = false; ui.page = 'plan'; sendPlanDraft(); render(); break;
+    case 'follow': followNow(t.dataset.id); break;
+    case 'unfollow': leaveFollowing(() => render()); break;
+    case 'bribeTo': ui.bribe.to = t.dataset.id; render(); break;
+    case 'bribeDoor': ui.bribe.door = i; render(); break;
+    case 'bribeAmt': ui.bribe.amount = Math.max(cfg().BRIBE_MIN, Math.min(bribeRoom(), ui.bribe.amount + Number(v))); render(); break;
+    case 'bribeCompany': ui.bribe.company = !ui.bribe.company; render(); break;
+    case 'bribeSend': {
+      const b = ui.bribe;
+      socket.emit('bribe', { to: b.to, door: b.door, amount: b.amount, company: b.company }, (r) => {
+        ack(r);
+        if (r && r.ok) { Sound.play('coins', 2); toast(S.phase === 'dm' ? 'Offer sent. It arrives when the doors open.' : 'Offer sent.'); ui.bribe.to = ''; }
+      });
+      break;
+    }
+    case 'bribeYes': case 'bribeNo':
+      socket.emit('bribeAnswer', { id: t.dataset.id, accept: act === 'bribeYes' }, (r) => { ack(r); if (r && r.ok) Sound.play(act === 'bribeYes' ? 'coins' : 'click', 1); });
+      break;
     case 'approach': ui.adv.approach = v; sendPlanDraft(); render(); break;
     case 'tog': ui.adv[v] = !ui.adv[v]; sendPlanDraft(); render(); break;
     case 'sheet':
@@ -1479,8 +1725,8 @@ document.addEventListener('click', (e) => {
       toast('You left the match.');
       break;
     case 'lockIn': {
-      const a = ui.adv;
-      socket.emit('action', { type: 'door', door: a.door, approach: a.approach, armour: a.armour, lock: a.lock, charm: a.charm || null, shove: a.shove || null }, (r) => { ack(r); if (r && r.ok) Sound.play('lockIn'); });
+      const plan = planForServer();
+      if (plan) socket.emit('action', plan, (r) => { ack(r); if (r && r.ok) Sound.play('lockIn'); });
       break;
     }
     case 'rest': restNow(); break;

@@ -23,7 +23,7 @@ const Tutorial = (() => {
     {
       key: 'welcome',
       title: 'Grab the gold. Trust no one.',
-      text: 'One player is the Dungeon Master and hides gold behind trapped doors. Everyone else grabs what they can. Each player is DM once, and the most gold wins.',
+      text: 'One player is the Dungeon Master and hides gold behind trapped doors. Everyone else grabs what they can. Your 40 starting gold is pocket money: you score what you gain, everyone is DM once, and the biggest total wins.',
       art: () => `
         <div class="tcol">
           <div class="t-dm">${Sprites.dmHood(4)}<span>The DM</span></div>
@@ -34,7 +34,7 @@ const Tutorial = (() => {
     {
       key: 'screen',
       title: 'Your screen',
-      text: 'The party is on the left, the room in the middle, and your screens on the right. Switch screens with the icons at the far right: Journal, Shop, Talk, History and Menu. A red dot means something needs you.',
+      text: 'The party is on the left, the room in the middle, and your screens on the right. Switch screens with the icons at the far right: Journal, Shop, Talk, History and Menu (and Offers, if the DM bribes you). A red dot means something needs you.',
       art: () => `
         <div class="tlayout">
           <div class="tl-left"><span>Party</span><i></i><i></i><i></i><em>Scores</em></div>
@@ -46,11 +46,11 @@ const Tutorial = (() => {
     {
       key: 'doors',
       title: 'Doors and clues',
-      text: 'Every door shows its gold. Its clue, the element of the trap behind it, is hidden until you scan the door. A silent door looks safe, but the DM can fake any clue.',
+      text: 'Every door shows its gold. Its clue, the element of the trap behind it, is hidden until you scan the door. The DM can fake any clue, and a trapped door hides extra gold for whoever survives it.',
       art: () => `
         <div class="trow end">
           ${door({ gold: 30, clue: 'none', label: '?', num: 'I' })}
-          <div class="tcol tight">${tag(`${I('fire', 2)} Smoke = Fire trap`)}${tag(`${I('water', 2)} Dripping = Water trap`)}${tag(`${I('earth', 2)} Rumbling = Earth trap`)}${tag(`${I('air', 2)} Draft = Air trap`)}${tag('Silent = no trap?', 'muted')}</div>
+          <div class="tcol tight">${tag(`${I('fire', 2)} Smoke = Fire trap`)}${tag(`${I('water', 2)} Dripping = Water trap`)}${tag(`${I('earth', 2)} Rumbling = Earth trap`)}${tag(`${I('air', 2)} Draft = Air trap`)}${tag('Silent = no trap?', 'muted')}${tag(`${I('coin', 2)} A trap hides more gold`, 'gold')}</div>
           ${door({ gold: 15, clue: 'fire', label: 'Smoke', num: 'II' })}
         </div>`,
     },
@@ -120,14 +120,38 @@ const Tutorial = (() => {
     {
       key: 'shop',
       title: 'While you wait',
-      text: 'Walk around with the arrow keys, or tap where to go. Walk up to the shopkeeper to shop (he sells oil too), and up to anyone to whisper. Your Journal keeps everything you learn. Spent gold no longer counts toward your score.',
+      text: 'Walk around with the arrow keys, or tap where to go. Walk up to the shopkeeper to shop, and up to anyone to whisper. Spent gold counts for the DM, and in a Shortage one item costs double for the round.',
       art: () => `
         <div class="trow end">
           <div class="tcol tight"><div class="tfire">${Sprites.flame(4)}<div class="tlogs"></div></div><span class="tt-sit">${Sprites.sitting(2, 'air', 3)}</span><span class="tfloat heal">+10 HP</span></div>
           <div class="titems">
-            ${[['potion', 'Potion', 'Heal 40'], ['flask', 'Oil', 'One more scan'], ['shield', 'Armour', 'Half damage'], ['eye', 'Lens', 'Scan sees the truth'], ['lock', 'Lock', 'Take all, lock others out'], ['push', 'Shove', 'Push someone in first']].map(([ic, n, d]) => `
-              <div class="titem">${I(ic, 3)}<b>${n}</b><span>${d}</span></div>`).join('')}
+            ${[['potion', 'Potion', 12, 'Heal 40'], ['flask', 'Oil', 7, 'One more scan'], ['shield', 'Armour', 14, 'Half damage'], ['eye', 'Lens', 12, 'Scan sees the truth'], ['lock', 'Lock', 15, 'Take all, lock others out'], ['push', 'Shove', 5, 'Push someone in first']].map(([ic, n, price, d]) => `
+              <div class="titem">${I(ic, 3)}<b>${n} <em class="tprice">${price}</em></b><span>${d}</span></div>`).join('')}
           </div>
+        </div>`,
+    },
+    {
+      key: 'tricks',
+      title: 'Dirty tricks',
+      text: 'Shove someone: if they pick your door, they go in first and alone, and you pickpocket 10% of their gold. A Lock takes all the room’s gold and shuts everyone else out, and no Shove gets past it.',
+      art: () => `
+        <div class="tcol tight left">
+          <div class="tline">${adv(2, 'air', 3)}<span class="tarrow">➜</span>${adv(1, 'water', 3)}<span class="tfloat gold">+5</span><span class="tfloat dmg">−5</span><span class="tnote">Shoved in first, pockets picked</span></div>
+          <div class="tline">${adv(3, 'earth', 3)}${I('lock', 3)}<span class="tnote">Locked in alone: all the gold, 2.5× damage</span></div>
+        </div>`,
+    },
+    {
+      key: 'follow',
+      title: 'Follow someone',
+      text: 'Instead of picking a door, secretly follow another adventurer: you copy their final door and speed, but not their items. They’re only told that someone is following them, and nobody can start or stop in the last 10 seconds.',
+      art: () => `
+        <div class="trow end">
+          ${door({ gold: 30, clue: 'none', label: '?', num: 'II' })}
+          <div class="tcol tight left">
+            <div class="tline">${adv(1, 'water', 3)}<span class="tnote">Ben picks Door II</span></div>
+            <div class="tline">${adv(2, 'air', 3)}<span class="tnote">You follow Ben</span></div>
+          </div>
+          <div class="tcol tight">${tag('Same door, same speed')}${tag('Not their items', 'muted')}${tag('“Someone is following you”', 'spite')}</div>
         </div>`,
     },
     {
@@ -146,15 +170,15 @@ const Tutorial = (() => {
     {
       key: 'dm',
       title: 'When you’re the DM',
-      text: 'Tap a door in the room, then use your Traps screen: drag the gold bar to share out the gold, tap a trap card to place it, and add a fake clue if you want to lie. Mana is your trap budget; unspent mana carries over. Gold nobody takes is yours.',
+      text: 'Drag the gold bar to place the bait. Your secret purse pays for traps, fake clues and Shortages, and every trap is gold hidden behind its door. You can also secretly bribe an adventurer to pick a door; you score the treasure they don’t gain.',
       art: () => `
         <div class="tcol tight" style="width:100%;max-width:340px">
-          <div class="tmana">${I('mana', 3)}<b>18 mana</b><span>your trap budget</span></div>
+          <div class="tpurse">${I('bag', 3)}<b>Purse: 24 gold</b><span>only you see it</span></div>
           <div class="tgoldbar"><span style="flex:30">I: 30</span><i></i><span style="flex:20">II: 20</span><i></i><span style="flex:10">III: 10</span></div>
           <div class="tcol tight" style="flex-direction:row;gap:6px">
-            ${[['Minor', '8'], ['Major', '14'], ['Deadly', '20']].map(([n, c]) => `<div class="ttcard"><b>${n}</b>${I('fire', 2)}<span>${I('mana', 1)} ${c}</span></div>`).join('')}
+            ${[['Minor', '8'], ['Major', '14'], ['Deadly', '20']].map(([n, c]) => `<div class="ttcard"><b>${n}</b>${I('fire', 2)}<span>${I('coin', 1)} ${c}</span></div>`).join('')}
           </div>
-          ${tag('Fake clue: make a door show anything', 'spite')}
+          <div class="trow" style="gap:6px;flex-wrap:wrap">${tag('Fake clue: make a door show anything', 'spite')}${tag(`${I('coin', 2)} Bribe: 6 gold for Door II?`, 'gold')}</div>
         </div>`,
     },
   ];

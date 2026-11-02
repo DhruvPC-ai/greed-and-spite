@@ -460,8 +460,24 @@ const Scene = (() => {
     const mine = info.entrants.includes(S.me);
     const verbs = { sprint: 'sprinted in', walk: 'walked in', sneak: 'sneaked in' };
     spotlightOn(door, anim());
-    caption(`Door ${ROMAN[info.index]}: ` + info.entrants.map((id) => `${who(id)} ${r.act[id].lock ? 'used a Lock' : verbs[r.act[id].approach]}`).join(', ') + '…', mine);
-    await wait(p, 650);
+    caption(`Door ${ROMAN[info.index]}: ` + info.entrants.map((id) => `${who(id)} ${r.act[id].lock ? 'used a Lock' : verbs[r.act[id].approach]}${r.act[id].follow ? ` (following ${who(r.act[id].follow)})` : ''}`).join(', ') + '…', mine);
+    await wait(p, info.entrants.some((id) => r.act[id].follow) ? 1100 : 650);
+
+    // bribes the DM pays as they go in, before any trap
+    const paidHere = (r.bribes || []).filter((b) => b.door === info.index);
+    if (paidHere.length) {
+      const from = dmBox ? { x: dmBox.offsetLeft + dmBox.offsetWidth / 2, y: dmBox.offsetTop + dmBox.offsetHeight / 2 } : { x: 40, y: 40 };
+      sfx(anim(), 'coins', 3);
+      paidHere.forEach((b) => {
+        const a = actors[b.to];
+        if (!a) return;
+        coins(from, { x: a.x, y: a.y - 36 }, 3, anim());
+        const o = overHead(a);
+        floatText(o.x, o.y, `+${b.amount} bribe`, 'gold', anim(), 300);
+      });
+      caption(paidHere.map((b) => `${who(b.to)} ${b.to === S.me ? 'were' : 'was'} paid ${b.amount} gold by the DM`).join('. ') + '.', paidHere.some((b) => b.to === S.me));
+      await wait(p, 1200);
+    }
 
     // locks and shoves at this door
     const lockers = info.entrants.filter((id) => r.act[id].lock);
@@ -493,8 +509,11 @@ const Scene = (() => {
     sfx(anim(), 'door');
     await wait(p, deadly ? 750 : 420);
 
+    // "made of gold": what the DM built on this door is extra gold behind it
+    const hiddenTxt = info.hidden ? `, +${info.hidden} hidden gold` : '';
+    if (info.hidden) floatText(door.g.cx, FLOOR - door.g.dh * 0.7, `+${info.hidden} hidden`, 'gold', anim(), 500);
     if (trap) {
-      caption(`Door ${ROMAN[info.index]}: ${TIER[trap.tier]} ${cap(trap.element)} trap!`, mine);
+      caption(`Door ${ROMAN[info.index]}: ${TIER[trap.tier]} ${cap(trap.element)} trap${hiddenTxt}!`, mine);
       trapFx(door, trap, anim(), deadly ? 1.7 : 1);
       sfx(anim(), trap.element, trap.tier !== 'minor');
       if (deadly) sfx(anim(), 'boom');
@@ -508,7 +527,7 @@ const Scene = (() => {
         setHp(a, r.before[id].hp - dmg, true);
       });
     } else {
-      caption(`Door ${ROMAN[info.index]}: no trap!`, mine);
+      caption(`Door ${ROMAN[info.index]}: no trap${hiddenTxt}!`, mine);
       floatText(door.g.cx, FLOOR - door.g.dh / 2, 'Empty', 'muted', anim(), 100);
       sfx(anim(), 'empty');
     }
@@ -531,6 +550,21 @@ const Scene = (() => {
       floatText(o.x, o.y, `+${sh}`, 'gold', anim(), 450);
     });
     await wait(p, paid ? 1000 : 300);
+
+    // pickpockets: a Shove that landed here also lifts some of the target's gold
+    const picks = (r.pickpockets || []).filter((x) => x.door === info.index);
+    if (picks.length) {
+      sfx(anim(), 'steal');
+      picks.forEach((x, k) => {
+        const s = actors[x.shover], t = actors[x.target];
+        if (!s || !t) return;
+        coins({ x: t.x, y: t.y - 36 }, { x: s.x, y: s.y - 36 }, 2, anim(), k * 200);
+        floatText(t.x, t.y - 74, `−${x.stolen}`, 'spite', anim(), k * 200);
+        floatText(s.x, s.y - 74, `+${x.stolen}`, 'gold', anim(), 250 + k * 200);
+      });
+      caption(picks.map((x) => `${who(x.shover)} pickpocketed ${x.stolen} gold from ${x.target === S.me ? 'you' : who(x.target)}`).join('. ') + '.', picks.some((x) => x.target === S.me || x.shover === S.me));
+      await wait(p, 1200);
+    }
   }
 
   async function playResult(S, r, instant) {

@@ -27,11 +27,37 @@ const C = {
   PACE: { relaxed: 1.5, normal: 1, fast: 0.7 },
   DEFAULT_PACE: 'normal',
 
-  // per-round DM gold budget and mana income
-  goldBudget: (doors, round) => doors * (10 + 10 * round),
-  manaIncome: (doors, round) => doors * (3 + 2 * round),
-  // the DM starts each dungeon with this much mana banked, so round 1 has real choices
-  DM_START_MANA: 8,
+  // the DM's gold each round. Bait is placed on the doors for everyone to see; it ramps
+  // linearly per door from BAIT_FIRST in round 1 to BAIT_LAST in the last round, rounded to
+  // the nearest GOLD_STEP (halves up). The treasury is the total bait of a dungeon.
+  BAIT_FIRST: 20,
+  BAIT_LAST: 60,
+  GOLD_STEP: 5,
+  baitPerDoor: (round, rounds) => {
+    const f = rounds > 1 ? (round - 1) / (rounds - 1) : 1;
+    return Math.floor((C.BAIT_FIRST + (C.BAIT_LAST - C.BAIT_FIRST) * f) / C.GOLD_STEP + 0.5 + 1e-9) * C.GOLD_STEP;
+  },
+  // the trap purse: a working budget only the DM sees (traps, fake clues, Shortages).
+  // Per door it ramps from PURSE_FIRST to PURSE_LAST, rounded half up. Unspent purse carries
+  // over within the dungeon and is worth nothing at the end.
+  PURSE_FIRST: 8,
+  PURSE_LAST: 16,
+  purseIncome: (doors, round, rounds) => {
+    const f = rounds > 1 ? (round - 1) / (rounds - 1) : 1;
+    return Math.floor(doors * (C.PURSE_FIRST + (C.PURSE_LAST - C.PURSE_FIRST) * f) + 0.5 + 1e-9);
+  },
+  // Shortage: during trap setting the DM can pay to multiply one shop item's price for the round
+  SHORTAGE_COST: 6,
+  SHORTAGE_MULT: 2,
+  // a landing Shove also steals this share of the target's gold (rounded down)
+  PICKPOCKET: 0.1,
+  // following: in the last FOLLOW_FREEZE seconds of choosing nobody can start or stop following
+  FOLLOW_FREEZE: 10,
+  // bribes: the DM can offer up to BRIBES_PER_ROUND, each at least BRIBE_MIN gold from the purse,
+  // until BRIBE_CUTOFF seconds before choosing ends
+  BRIBE_MIN: 3,
+  BRIBES_PER_ROUND: 2,
+  BRIBE_CUTOFF: 10,
 
   // scanning doors with the lantern
   SCAN_MS: 3000,                                   // how long a scan takes
@@ -44,7 +70,7 @@ const C = {
     major: { name: 'Major', cost: 14, dmg: 35 },
     deadly: { name: 'Deadly', cost: 20, dmg: 50 },
   },
-  ILLUSION_COST: 6,
+  ILLUSION_COST: 5, // a fake clue
 
   APPROACH: {
     sprint: { name: 'Sprint', bags: 3, mult: 1.5 },
@@ -63,14 +89,15 @@ const C = {
   HAUNT_STEAL: 0.25,
   DEATH_DROP: 0.5,
 
+  // shop prices: cheap for items that cause infighting, expensive for items that only protect
   SHOP: {
-    potion: { name: 'Potion', cost: 10, text: 'Heal 40 HP. Drink any time during your turn.' },
-    oil: { name: 'Oil flask', cost: 6, text: 'Fuel for one more lantern scan. You can carry as many flasks as there are doors.' },
-    armour: { name: 'Armour', cost: 12, text: 'Take half damage this round.' },
-    charm: { name: 'Charm', cost: 6, text: 'Resist one element of your choice this round.' },
-    lens: { name: 'Lens', cost: 10, text: 'Fit it to your lantern: your next scan shows the real trap and its strength, even through a fake clue.' },
-    lock: { name: 'Lock', cost: 10, text: 'Enter alone and take all the gold. Others on that door are locked out. You take 2.5× damage.' },
-    shove: { name: 'Shove', cost: 8, text: 'If your target picks your door, they spring the trap alone at 1.5×.' },
+    potion: { name: 'Potion', cost: 12, text: 'Heal 40 HP. Drink any time during your turn.' },
+    oil: { name: 'Oil flask', cost: 7, text: 'Fuel for one more lantern scan. You can carry as many flasks as there are doors.' },
+    armour: { name: 'Armour', cost: 14, text: 'Take half damage this round.' },
+    charm: { name: 'Charm', cost: 8, text: 'Resist one element of your choice this round.' },
+    lens: { name: 'Lens', cost: 12, text: 'Fit it to your lantern: your next scan shows the real trap and its strength, even through a fake clue.' },
+    lock: { name: 'Lock', cost: 15, text: 'Enter alone and take all the gold. Others on that door are locked out. You take 2.5× damage.' },
+    shove: { name: 'Shove', cost: 5, text: 'If your target picks your door, they spring the trap alone at 1.5×, and you pickpocket 10% of their gold.' },
   },
 };
 
@@ -140,7 +167,12 @@ const PUBLIC_CONFIG = {
   APPROACH: C.APPROACH, ROOM_BAGS: C.ROOM_BAGS, LOCK_MULT: C.LOCK_MULT, SHOVE_MULT: C.SHOVE_MULT,
   RESIST: C.RESIST, WEAK: C.WEAK, CHARM: C.CHARM, ARMOUR: C.ARMOUR,
   HAUNT_STEAL: C.HAUNT_STEAL, DEATH_DROP: C.DEATH_DROP, SHOP: C.SHOP,
-  TIME: C.TIME, PACE: C.PACE, DM_START_MANA: C.DM_START_MANA, SCAN_MS: C.SCAN_MS,
+  BAIT_FIRST: C.BAIT_FIRST, BAIT_LAST: C.BAIT_LAST,
+  GOLD_STEP: C.GOLD_STEP, SHORTAGE_COST: C.SHORTAGE_COST, SHORTAGE_MULT: C.SHORTAGE_MULT, PICKPOCKET: C.PICKPOCKET,
+  FOLLOW_FREEZE: C.FOLLOW_FREEZE, BRIBE_MIN: C.BRIBE_MIN, BRIBES_PER_ROUND: C.BRIBES_PER_ROUND, BRIBE_CUTOFF: C.BRIBE_CUTOFF,
+  // the same windows in real milliseconds, after TIME_SCALE (see below), so the client greys out buttons on time
+  FOLLOW_FREEZE_MS: C.FOLLOW_FREEZE * 1000 * Number(process.env.TIME_SCALE || 1), BRIBE_CUTOFF_MS: C.BRIBE_CUTOFF * 1000 * Number(process.env.TIME_SCALE || 1),
+  TIME: C.TIME, PACE: C.PACE, SCAN_MS: C.SCAN_MS,
   MESSAGES, NEAR: ROOM.NEAR, FLOOR_W: ROOM.FLOOR_W, FLOOR_H: ROOM.FLOOR_H,
   ELEMENTS, WEAK_TO,
 };
@@ -232,6 +264,8 @@ function startMatch(room) {
       settings: { ...room.settings },
       config: {
         startHp: C.START_HP, startGold: C.START_GOLD, traps: C.TRAPS, illusionCost: C.ILLUSION_COST,
+        shortageCost: C.SHORTAGE_COST, shortageMult: C.SHORTAGE_MULT, pickpocket: C.PICKPOCKET,
+        followFreeze: C.FOLLOW_FREEZE, bribeMin: C.BRIBE_MIN, bribesPerRound: C.BRIBES_PER_ROUND, bribeCutoff: C.BRIBE_CUTOFF,
         shop: Object.fromEntries(Object.entries(C.SHOP).map(([k, v]) => [k, v.cost])),
       },
       dungeons: [],
@@ -247,9 +281,8 @@ function startDungeon(room) {
   const advIds = m.dmOrder.filter((id) => id !== dmId && !room.players.find((p) => p.id === id && p.left));
   const doorsCount = Math.max(2, advIds.length - 1);
   const rounds = room.settings.rounds;
-  let goldTotal = 0;
-  for (let r = 1; r <= rounds; r++) goldTotal += C.goldBudget(doorsCount, r);
-  const P = goldTotal + advIds.length * C.START_GOLD;
+  // the treasury: all the bait gold of every round, fixed now. Scores are measured against it.
+  const T = treasuryUpTo(doorsCount, rounds, rounds);
 
   const adv = {};
   for (const id of advIds) {
@@ -265,7 +298,7 @@ function startDungeon(room) {
     };
   }
   m.dungeon = {
-    dmId, advIds, doorsCount, rounds, round: 0, P, mana: C.DM_START_MANA, budget: 0, adv,
+    dmId, advIds, doorsCount, rounds, round: 0, T, purse: 0, budget: 0, shortage: null, snap: {}, adv,
     doors: null, draft: null, actions: {}, haunts: {}, ghostDone: {}, lens: {},
     lastResult: null, scores: null, history: [], awards: null, pos: {}, known: {}, scans: {}, scanCount: {},
   };
@@ -274,7 +307,7 @@ function startDungeon(room) {
     dm: nameOf(room, dmId),
     adventurers: advIds.map((id) => nameOf(room, id)),
     doorsPerRound: doorsCount,
-    pot: P,
+    treasury: T,
     affinities: {},
     shop: [],
     rounds: [],
@@ -282,9 +315,50 @@ function startDungeon(room) {
     awards: null,
   });
   resetSpots(m.dungeon);
+  takeSnapshot(m.dungeon);
   setPhase(room, 'setup', phaseTime(room, 'setup'), () => endSetup(room));
   broadcast(room);
 }
+
+// total bait for rounds 1..upTo of a dungeon
+function treasuryUpTo(doors, rounds, upTo) {
+  let t = 0;
+  for (let r = 1; r <= upTo; r++) t += C.baitPerDoor(r, rounds) * doors;
+  return t;
+}
+// what other players see of each adventurer's gold and HP until the doors open (see viewFor)
+function takeSnapshot(d) {
+  d.snap = {};
+  for (const id of d.advIds) d.snap[id] = { hp: d.adv[id].hp, gold: d.adv[id].gold };
+}
+// the shop price right now: a Shortage multiplies one item's price from the moment the doors open
+function priceOf(d, item) {
+  const base = C.SHOP[item].cost;
+  return d && d.shortage && d.shortage.item === item ? d.shortage.price : base;
+}
+
+/* ---------- following and bribes ---------- */
+// the plan that counts right now: the locked-in one, else the unlocked draft
+const planOf = (d, id) => (d.actions && d.actions[id]) || (d.drafts && d.drafts[id]) || null;
+const followingNow = (d, id) => { const p = planOf(d, id); return p && p.type === 'follow' ? p.leader : null; };
+// seconds left in the choosing phase, in real (scaled) time
+const msLeft = (room) => (room.deadline ? room.deadline - Date.now() : Infinity);
+const followFrozen = (room) => room.phase === 'adv' && msLeft(room) < C.FOLLOW_FREEZE * 1000 * TIME_SCALE;
+const bribesClosed = (room) => !(room.phase === 'dm' || (room.phase === 'adv' && msLeft(room) >= C.BRIBE_CUTOFF * 1000 * TIME_SCALE));
+// is b anywhere up a's chain of leaders (by the plans as they stand)?
+function leadsTo(d, a, b, plans) {
+  const seen = new Set([a]);
+  let cur = a;
+  for (;;) {
+    const p = plans[cur];
+    const L = p && p.type === 'follow' ? p.leader : null;
+    if (!L || seen.has(L)) return false;
+    if (L === b) return true;
+    seen.add(L);
+    cur = L;
+  }
+}
+const followLinked = (d, a, b, plans) => leadsTo(d, a, b, plans) || leadsTo(d, b, a, plans);
 
 function dlog(room) {
   const L = room.match.log.dungeons;
@@ -370,8 +444,11 @@ function endSetup(room) {
 function startRound(room) {
   const d = room.match.dungeon;
   d.round += 1;
-  d.budget = C.goldBudget(d.doorsCount, d.round);
-  d.mana += C.manaIncome(d.doorsCount, d.round);
+  d.budget = C.baitPerDoor(d.round, d.rounds) * d.doorsCount;
+  d.purseIncome = C.purseIncome(d.doorsCount, d.round, d.rounds);
+  d.purse += d.purseIncome; // unspent purse carries over
+  d.purseStart = d.purse;
+  d.shortage = null; // prices go back to normal every round
   // fresh oil every round, up to what a lantern can carry
   for (const id of livingIds(d)) {
     const st = d.adv[id];
@@ -386,9 +463,12 @@ function startRound(room) {
   d.drafts = {};
   d.haunts = {};
   d.ghostDone = {};
+  d.followedEver = {}; // who has been followed at some point this round (for the "stopped" warning)
+  d.bribes = [];
 
   d.lastResult = null;
   resetSpots(d);
+  takeSnapshot(d);
   setPhase(room, 'dm', phaseTime(room, 'dm'), () => dmTimeout(room));
   broadcast(room);
 }
@@ -413,6 +493,7 @@ function validateDM(d, draft) {
     if (!Number.isInteger(gold) || gold < C.MIN_DOOR_GOLD) {
       return { ok: false, error: `Every door needs at least ${C.MIN_DOOR_GOLD} gold.` };
     }
+    if (gold % C.GOLD_STEP !== 0) return { ok: false, error: `Place gold in steps of ${C.GOLD_STEP}.` };
     sum += gold;
     let trap = null;
     if (raw.trap) {
@@ -430,36 +511,50 @@ function validateDM(d, draft) {
       illusion = raw.illusion;
       cost += C.ILLUSION_COST;
     }
-    doors.push({ gold, trap, illusion });
+    // "made of gold": what the DM builds on a door is gold hidden behind it
+    const hidden = (trap ? C.TRAPS[trap.tier].cost : 0) + (illusion !== null ? C.ILLUSION_COST : 0);
+    doors.push({ gold, trap, illusion, hidden });
+  }
+  let shortage = null;
+  if (draft.shortage !== null && draft.shortage !== undefined && draft.shortage !== '') {
+    if (!C.SHOP[draft.shortage]) return { ok: false, error: 'Pick a shop item for the Shortage.' };
+    shortage = draft.shortage;
+    cost += C.SHORTAGE_COST;
   }
   if (sum !== d.budget) {
     return { ok: false, error: `Place exactly ${d.budget} gold (you placed ${sum}).` };
   }
-  if (cost > d.mana) {
-    return { ok: false, error: `That costs ${cost} mana. You have ${d.mana}.` };
+  if (cost > d.purse) {
+    return { ok: false, error: `That costs ${cost} gold. Your purse has ${d.purse}.` };
   }
-  return { ok: true, doors, cost };
+  return { ok: true, doors, cost, shortage };
 }
 
-function commitDM(room, doors, cost, timedOut) {
+function commitDM(room, doors, cost, timedOut, shortage) {
   const d = room.match.dungeon;
+  d.shortage = shortage ? { item: shortage, was: C.SHOP[shortage].cost, price: C.SHOP[shortage].cost * C.SHORTAGE_MULT } : null;
   dlog(room).rounds.push({
     round: d.round,
-    goldBudget: d.budget,
-    manaAvailable: d.mana,
-    manaSpent: cost,
+    bait: d.budget,
+    purseStart: d.purseStart, // after this round's income, before anything is spent or offered
+    purseIncome: d.purseIncome,
+    purseAvailable: d.purse,
+    purseSpent: cost,
+    purseLeft: d.purse - cost,
+    shortage: d.shortage ? { item: shortage, price: d.shortage.price, normal: d.shortage.was, cost: C.SHORTAGE_COST } : null,
     dmTimedOut: !!timedOut,
     doors: doors.map((x, i) => ({
-      door: ROMAN[i], gold: x.gold, trap: trapText(x.trap),
+      door: ROMAN[i], gold: x.gold, trap: trapText(x.trap), hiddenGold: x.hidden,
       illusion: x.illusion, clueShown: x.illusion !== null ? x.illusion : x.trap ? x.trap.element : 'none',
     })),
   });
-  d.mana -= cost;
+  d.purse -= cost;
   d.doors = doors.map((x) => ({
     ...x,
     clue: x.illusion !== null ? x.illusion : x.trap ? x.trap.element : 'none',
   }));
   d.dmTimedOut = !!timedOut;
+  for (const b of d.bribes || []) b.delivered = true; // offers made while setting traps arrive as the doors open
   setPhase(room, 'adv', phaseTime(room, 'adv'), () => resolveRound(room));
   broadcast(room);
 }
@@ -470,15 +565,16 @@ function dmTimeout(room) {
   if (!v.ok && d.draft && Array.isArray(d.draft.doors) && d.draft.doors.length === d.doorsCount) {
     // keep the DM's traps, fix the gold
     const g = evenGold(d);
-    v = validateDM(d, { doors: d.draft.doors.map((x, i) => ({ ...x, gold: g[i] })) });
+    v = validateDM(d, { doors: d.draft.doors.map((x, i) => ({ ...x, gold: g[i] })), shortage: d.draft.shortage });
   }
   if (!v.ok) {
     const g = evenGold(d);
     v = validateDM(d, { doors: g.map((gold) => ({ gold, trap: null, illusion: null })) });
   }
-  commitDM(room, v.doors, v.cost, true);
+  commitDM(room, v.doors, v.cost, true, v.shortage);
 }
 
+const FROZEN = `Too late: nobody can start or stop following in the last ${C.FOLLOW_FREEZE} seconds.`;
 function livingIds(d) {
   return d.advIds.filter((id) => d.adv[id].alive && !d.adv[id].left);
 }
@@ -509,11 +605,19 @@ function checkAdvDone(room) {
 }
 
 function cleanAction(d, st, pid, a) {
-  if (!a || (a.type !== 'rest' && a.type !== 'door')) return { error: 'Pick a door or rest.' };
+  if (!a || !['rest', 'door', 'follow'].includes(a.type)) return { error: 'Pick a door or rest.' };
   if (a.type === 'rest') return { action: { type: 'rest' } };
-  if (!Number.isInteger(a.door) || a.door < 0 || a.door >= d.doorsCount) return { error: 'Pick a door.' };
-  if (!C.APPROACH[a.approach]) return { error: 'Pick Sprint, Walk or Sneak.' };
-  const clean = { type: 'door', door: a.door, approach: a.approach, armour: false, charm: null, lock: false, shove: null };
+  let clean;
+  if (a.type === 'follow') {
+    const L = a.leader;
+    if (L === pid || !d.adv[L] || !d.adv[L].alive || d.adv[L].left) return { error: 'Pick a living adventurer to follow.' };
+    // following copies the leader's final door and speed, never their items
+    clean = { type: 'follow', leader: L, armour: false, charm: null, lock: false, shove: null };
+  } else {
+    if (!Number.isInteger(a.door) || a.door < 0 || a.door >= d.doorsCount) return { error: 'Pick a door.' };
+    if (!C.APPROACH[a.approach]) return { error: 'Pick Sprint, Walk or Sneak.' };
+    clean = { type: 'door', door: a.door, approach: a.approach, armour: false, charm: null, lock: false, shove: null };
+  }
   if (a.armour) { if (st.inv.armour < 1) return { error: 'You have no Armour.' }; clean.armour = true; }
   if (a.charm) {
     if (st.inv.charm < 1) return { error: 'You have no Charm.' };
@@ -551,46 +655,96 @@ function resolveRound(room) {
   const before = {};
   for (const id of d.advIds) before[id] = { hp: d.adv[id].hp, gold: d.adv[id].gold };
 
+  // final plans: locked in, else the unlocked draft, else nothing (rest)
+  const plans = {};
+  for (const id of living) plans[id] = planOf(d, id);
+  // following resolves to the end of the chain: the follower copies that leader's final door and
+  // speed. Loops, and leaders who left, fall back to resting; if the leader rests, followers rest.
+  const chainEnd = (id) => {
+    const seen = new Set([id]);
+    let cur = id;
+    for (;;) {
+      const p = plans[cur];
+      if (!p || p.type !== 'follow') return { lead: cur };
+      const L = p.leader;
+      if (seen.has(L)) return { loop: true };
+      const ls = d.adv[L];
+      if (!ls || !ls.alive || ls.left || !living.includes(L)) return { gone: L };
+      seen.add(L);
+      cur = L;
+    }
+  };
+
   // final actions, with item use verified and consumed
   const act = {};
   for (const id of living) {
     const st = d.adv[id];
-    const a = d.actions[id] || (d.drafts && d.drafts[id]) || null;
-    if (!a || a.type !== 'door') {
+    const a = plans[id];
+    if (!a || (a.type !== 'door' && a.type !== 'follow')) {
       act[id] = { type: 'rest', auto: !a };
       continue;
     }
-    const f = { type: 'door', door: a.door, approach: a.approach, armour: false, charm: null, lock: false, shove: null };
+    let door = a.door, approach = a.approach;
+    if (a.type === 'follow') {
+      const end = chainEnd(id);
+      const lp = end.lead ? plans[end.lead] : null;
+      if (!lp || lp.type !== 'door') {
+        act[id] = { type: 'rest', auto: false, follow: a.leader, why: end.loop ? 'loop' : end.gone ? 'gone' : 'rest' };
+        continue;
+      }
+      door = lp.door;
+      approach = lp.approach;
+    }
+    const f = { type: 'door', door, approach, armour: false, charm: null, lock: false, shove: null, follow: a.type === 'follow' ? a.leader : null };
     if (a.armour && st.inv.armour > 0) { st.inv.armour--; f.armour = true; }
     if (a.charm && st.inv.charm > 0) { st.inv.charm--; f.charm = a.charm; }
     if (a.lock && st.inv.lock > 0) { st.inv.lock--; f.lock = true; }
-    if (a.shove && st.inv.shove > 0) { st.inv.shove--; f.shove = a.shove; }
+    if (a.shove && st.inv.shove > 0) {
+      // no shoving within a following link, either way along the chain: it fizzles and the Shove is kept
+      if (followLinked(d, id, a.shove, plans)) f.fizzled = a.shove;
+      else { st.inv.shove--; f.shove = a.shove; }
+    }
     act[id] = f;
   }
 
   const dmg = {};
   const share = {};
-  const result = { round: d.round, doors: [], rests: [], haunts: [], deaths: [], dmTimedOut: d.dmTimedOut, act, before, after: null };
+  const result = {
+    round: d.round, doors: [], rests: [], bribes: [], pickpockets: [], haunts: [], deaths: [], dmTimedOut: d.dmTimedOut, act, before, after: null,
+    shortage: d.shortage ? { item: d.shortage.item, price: d.shortage.price, was: d.shortage.was } : null,
+  };
+  const landed = []; // Shoves that landed: { shover, target, door }
 
+  // work out who enters each door, who springs its trap and each entrant's share of the loot
   d.doors.forEach((door, i) => {
     const entrants = living.filter((id) => act[id].type === 'door' && act[id].door === i);
+    const hidden = door.hidden || 0;
+    const loot = door.gold + hidden; // visible bait + the hidden gold the DM built into the door
     const info = {
-      index: i, gold: door.gold, trap: door.trap, illusion: door.illusion, clue: door.clue,
-      entrants, triggered: [], lockedOut: [], shoved: [], lines: [], left: door.gold,
+      index: i, gold: door.gold, hidden, loot, trap: door.trap, illusion: door.illusion, clue: door.clue,
+      entrants, triggered: [], lockedOut: [], shoved: [], lines: [], left: loot,
     };
     const lines = info.lines;
+    const hiddenLine = () => { if (hidden) lines.push(`+${hidden} hidden gold behind the door.`); };
 
     if (entrants.length === 0) {
-      lines.push(`Nobody entered. ${door.gold} gold stays with the dungeon.`);
+      lines.push(`Nobody entered. ${loot} gold stays with the dungeon.`);
       if (door.trap) lines.push(`It held a ${trapLabel(door.trap)}.`);
       else lines.push('It held no trap.');
       if (door.illusion !== null) lines.push('The clue was an illusion.');
+      hiddenLine();
       result.doors.push(info);
       return;
     }
 
     const movers = entrants.map((id) => `${nameOf(room, id)} ${{ sprint: 'sprinted', walk: 'walked', sneak: 'sneaked' }[act[id].approach]}`);
     lines.push(movers.join(', ') + '.');
+    for (const id of entrants) {
+      if (act[id].follow) lines.push(`${nameOf(room, id)} followed ${nameOf(room, act[id].follow)} through Door ${ROMAN[i]}.`);
+    }
+    for (const id of entrants) {
+      if (act[id].fizzled) lines.push(`${nameOf(room, id)}'s Shove on ${nameOf(room, act[id].fizzled)} fizzled: you can't shove along a following link. The Shove was kept.`);
+    }
 
     const lockers = entrants.filter((id) => act[id].lock);
     let triggers = [];
@@ -601,7 +755,7 @@ function resolveRound(room) {
       info.lockedOut = entrants.filter((id) => !act[id].lock);
       triggers = lockers;
       mult = C.LOCK_MULT;
-      const each = Math.floor(door.gold / lockers.length);
+      const each = Math.floor(loot / lockers.length);
       for (const id of lockers) myShare[id] = each;
       lines.push(`${listNames(room, lockers)} used a Lock and slammed the door.` +
         (info.lockedOut.length ? ` ${listNames(room, info.lockedOut)} ${info.lockedOut.length > 1 ? 'were' : 'was'} locked out.` : ''));
@@ -625,6 +779,10 @@ function resolveRound(room) {
         }
         told.add(id);
       }
+      for (const id of entrants) {
+        const t = act[id].shove;
+        if (t && t !== id && entrants.includes(t)) landed.push({ shover: id, target: t, door: i });
+      }
       if (shoved.length) {
         triggers = shoved;
         mult = C.SHOVE_MULT;
@@ -636,12 +794,22 @@ function resolveRound(room) {
       }
       const bags = entrants.reduce((s, id) => s + C.APPROACH[act[id].approach].bags, 0);
       const denom = Math.max(C.ROOM_BAGS, bags);
-      for (const id of entrants) myShare[id] = Math.floor((door.gold * C.APPROACH[act[id].approach].bags) / denom);
+      for (const id of entrants) myShare[id] = Math.floor((loot * C.APPROACH[act[id].approach].bags) / denom);
     }
     for (const id of entrants) {
       if (act[id].shove && !entrants.includes(act[id].shove)) {
         lines.push(`${nameOf(room, id)}'s Shove missed: ${nameOf(room, act[id].shove)} went elsewhere.`);
       }
+    }
+
+    // bribes on this door: paid if the adventurer goes through it (not locked out), and, if the DM
+    // asked for company, at least one other adventurer goes through with them
+    const inside = entrants.filter((id) => !info.lockedOut.includes(id));
+    for (const b of d.bribes || []) {
+      if (b.door !== i || b.answer === 'declined' || !inside.includes(b.to)) continue;
+      if (b.company && !inside.some((id) => id !== b.to)) { b.outcome = 'no company'; continue; }
+      b.outcome = 'paid';
+      lines.push(`${nameOf(room, b.to)} was paid ${b.amount} gold by the DM.`);
     }
 
     info.triggered = triggers;
@@ -657,18 +825,41 @@ function resolveRound(room) {
       lines.push('No trap.');
     }
     if (door.illusion !== null) lines.push('The clue was an illusion.');
+    hiddenLine();
     for (const [id, s] of Object.entries(myShare)) share[id] = s;
     info.share = myShare;
     result.doors.push(info);
   });
 
-  // apply damage, then gold to survivors
+  /* Resolution order:
+       0. bribes paid on entry
+       1. trap damage
+       2. loot (visible + hidden gold, by bags); anyone killed gets no share
+       3. pickpocketing (10% of the target's gold after loot)
+       4. haunts (25% steal if the haunt target took trap damage)
+       5. deaths (half of the remaining gold dropped back to the DM)
+     Resting heals between 3 and 4; it doesn't touch gold. */
+
+  // 0. bribes are paid on entry, before any trap damage; every other reserved bribe goes back to the purse
+  for (const b of d.bribes || []) {
+    if (b.outcome === 'paid') {
+      d.adv[b.to].gold += b.amount;
+      result.bribes.push({ to: b.to, door: b.door, amount: b.amount });
+    } else if (b.answer !== 'declined') {
+      // declined offers were returned when they were declined
+      d.purse += b.amount;
+      if (!b.outcome) b.outcome = 'did not go';
+    }
+  }
+
+  // 1. trap damage
   const died = [];
   for (const id of living) {
     const st = d.adv[id];
     if (dmg[id]) st.hp -= dmg[id];
     if (st.hp <= 0) died.push(id);
   }
+  // 2. loot, to survivors
   for (const info of result.doors) {
     let paid = 0;
     const parts = [];
@@ -682,9 +873,23 @@ function resolveRound(room) {
       parts.push(`${nameOf(room, id)} +${s}`);
     }
     if (info.entrants.length) {
-      info.left = info.gold - paid;
+      info.left = info.loot - paid;
       info.lines.push(`Gold: ${parts.join(', ')}.` + (info.left > 0 ? ` ${info.left} left behind.` : ''));
     }
+  }
+
+  // 3. pickpocketing: every Shove that landed steals a share of its target's gold, in the order
+  // the shovers joined the game. A Lock on the door stops it (no Shove lands there), and a shover
+  // the trap killed steals nothing, just as they loot nothing.
+  const joinOrder = (id) => room.players.findIndex((x) => x.id === id);
+  landed.sort((a, b) => joinOrder(a.shover) - joinOrder(b.shover));
+  for (const sh of landed) {
+    if (died.includes(sh.shover)) continue;
+    const stolen = Math.floor(d.adv[sh.target].gold * C.PICKPOCKET + 1e-9);
+    d.adv[sh.target].gold -= stolen;
+    d.adv[sh.shover].gold += stolen;
+    result.pickpockets.push({ ...sh, stolen });
+    result.doors[sh.door].lines.push(`${nameOf(room, sh.shover)} pickpocketed ${stolen} gold from ${nameOf(room, sh.target)}.`);
   }
 
   // rest
@@ -693,11 +898,11 @@ function resolveRound(room) {
       const st = d.adv[id];
       const healed = Math.min(C.REST_HEAL, C.START_HP - st.hp);
       st.hp += healed;
-      result.rests.push({ id, healed, auto: act[id].auto });
+      result.rests.push({ id, healed, auto: act[id].auto, follow: act[id].follow || null, why: act[id].why || null });
     }
   }
 
-  // haunts (ghosts from before this round)
+  // 4. haunts (ghosts from before this round)
   const byTarget = {};
   for (const g of ghosts) {
     const t = d.haunts[g];
@@ -717,7 +922,7 @@ function resolveRound(room) {
     if (t && !(dmg[t] > 0)) result.haunts.push({ ghost: g, target: t, stolen: 0 });
   }
 
-  // deaths
+  // 5. deaths
   for (const id of died) {
     const st = d.adv[id];
     const drop = Math.floor(st.gold * C.DEATH_DROP);
@@ -740,12 +945,17 @@ function resolveRound(room) {
 function logRound(room, d, r) {
   const n = (id) => nameOf(room, id);
   const entry = dlog(room).rounds[dlog(room).rounds.length - 1];
+  entry.bribesPaid = (r.bribes || []).reduce((t, b) => t + b.amount, 0);
+  entry.purseEnd = d.purse; // after bribes are paid or returned
   entry.choices = d.advIds.filter((id) => r.before[id].hp > 0 && r.act[id]).map((id) => {
     const a = r.act[id];
-    if (a.type === 'rest') return { player: n(id), choice: a.auto ? 'rest (timed out)' : 'rest' };
+    if (a.type === 'rest') {
+      if (a.follow) return { player: n(id), choice: 'rest', following: n(a.follow), why: { loop: 'following loop', gone: 'leader gone', rest: 'leader rested' }[a.why] };
+      return { player: n(id), choice: a.auto ? 'rest (timed out)' : 'rest' };
+    }
     return {
-      player: n(id), choice: a.approach, door: ROMAN[a.door],
-      items: [a.lock && 'lock', a.armour && 'armour', a.charm && `charm:${a.charm}`, a.shove && `shove:${n(a.shove)}`].filter(Boolean),
+      player: n(id), choice: a.approach, door: ROMAN[a.door], ...(a.follow ? { following: n(a.follow) } : {}),
+      items: [a.lock && 'lock', a.armour && 'armour', a.charm && `charm:${a.charm}`, a.shove && `shove:${n(a.shove)}`, a.fizzled && `shove:${n(a.fizzled)} (fizzled, kept)`].filter(Boolean),
     };
   });
   entry.outcome = r.doors.map((x) => ({
@@ -753,11 +963,17 @@ function logRound(room, d, r) {
     entered: x.entrants.map(n),
     sprangTrap: x.trap ? x.triggered.map(n) : [],
     lockedOut: x.lockedOut.map(n),
+    hiddenGold: x.hidden,
     damage: Object.fromEntries(Object.entries(x.damage || {}).map(([id, v]) => [n(id), v])),
     gold: Object.fromEntries(Object.entries(x.share || {}).filter(([id]) => !r.deaths.some((q) => q.id === id)).map(([id, v]) => [n(id), v])),
     leftBehind: x.left,
     story: x.lines.join(' '),
   }));
+  entry.bribes = (d.bribes || []).map((b) => ({
+    to: n(b.to), door: ROMAN[b.door], amount: b.amount, company: b.company, offered: b.phase === 'dm' ? 'while setting traps' : 'while choosing',
+    answer: b.answer || 'no answer', outcome: b.answer === 'declined' ? 'returned to the purse' : b.outcome === 'paid' ? 'paid' : `${b.outcome || 'did not go'}, returned to the purse`,
+  }));
+  entry.pickpockets = r.pickpockets.map((x) => ({ shover: n(x.shover), target: n(x.target), door: ROMAN[x.door], stolen: x.stolen }));
   entry.haunts = r.haunts.map((h) => ({ ghost: n(h.ghost), target: n(h.target), stolen: h.stolen }));
   entry.deaths = r.deaths.map((x) => ({ player: n(x.id), dropped: x.dropped }));
   entry.after = Object.fromEntries(d.advIds.map((id) => [n(id), { hp: r.after[id].hp, gold: r.after[id].gold, alive: d.adv[id].alive }]));
@@ -825,35 +1041,42 @@ function afterResults(room) {
   else startRound(room);
 }
 
-// early: the DM left, or too few players remain. Only gold that was actually put in play counts.
+// early: the DM left, or too few players remain. Only the bait of rounds whose gold was placed counts.
+// Scores measure gold GAINED (gold held at the end minus starting gold) against the treasury T:
+//   adventurer = gain × N ÷ T × 100;  DM = (T − sum of adventurers' gains) ÷ T × 100.
 function endDungeon(room, early) {
   const m = room.match;
   const d = m.dungeon;
   const N = d.advIds.length;
-  let P = d.P;
+  let T = d.T;
   if (early) {
     const placed = room.phase === 'dm' || room.phase === 'setup' ? d.round - 1 : d.round;
-    P = d.advIds.length * C.START_GOLD;
-    for (let r = 1; r <= placed; r++) P += C.goldBudget(d.doorsCount, r);
+    T = treasuryUpTo(d.doorsCount, d.rounds, placed);
     d.endedEarly = early;
   }
-  let sumHeld = 0;
+  const r1 = (x) => Math.round(x * 10) / 10;
+  let sumGain = 0;
   const scores = {};
   for (const id of d.advIds) {
     const held = d.adv[id].gold;
-    sumHeld += held;
-    scores[id] = { role: 'adv', held, alive: d.adv[id].alive, left: !!d.adv[id].left, score: Math.round(((held * N) / P) * 1000) / 10 };
+    const gain = held - C.START_GOLD;
+    sumGain += gain;
+    // with no treasury yet (the dungeon ended before any gold was placed) nobody scores
+    scores[id] = { role: 'adv', held, gain, alive: d.adv[id].alive, left: !!d.adv[id].left, score: T > 0 ? r1((gain * N * 100) / T) : 0 };
   }
   const dmLeft = early === 'dmLeft';
-  scores[d.dmId] = { role: 'dm', held: P - sumHeld, left: dmLeft, score: dmLeft ? 0 : Math.round(((P - sumHeld) / P) * 1000) / 10 };
-  d.P = P;
-  for (const [id, s] of Object.entries(scores)) m.totals[id] = Math.round((m.totals[id] + s.score) * 10) / 10;
+  scores[d.dmId] = { role: 'dm', kept: T - sumGain, gain: T - sumGain, left: dmLeft, score: dmLeft || T <= 0 ? 0 : r1(((T - sumGain) * 100) / T) };
+  d.T = T;
+  for (const [id, s] of Object.entries(scores)) m.totals[id] = r1(m.totals[id] + s.score);
   d.scores = scores;
   d.awards = computeAwards(room, d);
   stopAllScans(d, false);
-  m.history.push({ dmId: d.dmId, P: d.P, scores });
+  m.history.push({ dmId: d.dmId, T: d.T, scores });
   const L = dlog(room);
-  L.scores = Object.fromEntries(Object.entries(scores).map(([id, sc]) => [nameOf(room, id), { role: sc.role, goldHeld: sc.held, score: sc.score }]));
+  L.treasury = d.T;
+  L.scores = Object.fromEntries(Object.entries(scores).map(([id, sc]) => [nameOf(room, id), sc.role === 'dm'
+    ? { role: 'dm', treasuryKept: sc.kept, score: sc.score }
+    : { role: 'adv', goldHeld: sc.held, gain: sc.gain, score: sc.score }]));
   L.awards = d.awards.map((a) => ({ title: a.title, players: a.players.map((id) => nameOf(room, id)), text: a.text }));
   m.log.totals = Object.fromEntries(Object.entries(m.totals).map(([id, v]) => [nameOf(room, id), v]));
   if (early) L.endedEarly = early === 'dmLeft' ? 'The DM left' : 'Too few players';
@@ -943,16 +1166,22 @@ function viewFor(room, p) {
 
   const role = p.id === d.dmId ? 'dm' : d.adv[p.id] ? (d.adv[p.id].alive ? 'adv' : 'ghost') : 'spectator';
   const showResult = ['results', 'dungeonEnd'].includes(room.phase);
+  // while the shop is open, everyone (the DM included) sees OTHER players' gold and HP as they
+  // were at the last snapshot, so purchases and potions stay secret until the doors open
+  const snapshotted = ['setup', 'dm', 'adv'].includes(room.phase);
   const dv = {
     dmId: d.dmId, advIds: d.advIds, doorsCount: d.doorsCount, rounds: d.rounds, round: d.round,
-    P: d.P, budget: d.budget, role,
+    T: d.T, budget: d.budget, role,
     advs: d.advIds.map((id) => {
       const s = d.adv[id];
       let ready = false;
       if (room.phase === 'setup') ready = s.setupReady;
       if (room.phase === 'adv') ready = s.alive ? !!d.actions[id] : !!d.ghostDone[id];
-      return { id, hp: s.hp, gold: s.gold, affinity: s.affinity, alive: s.alive, left: !!s.left, ready };
+      const seen = snapshotted && id !== p.id && d.snap && d.snap[id] ? d.snap[id] : s;
+      return { id, hp: seen.hp, gold: seen.gold, affinity: s.affinity, alive: s.alive, left: !!s.left, ready };
     }),
+    // a Shortage is public once the doors open, and lasts until the round ends
+    shortage: d.shortage && ['adv', 'results'].includes(room.phase) ? { ...d.shortage } : null,
     doors: d.doors ? d.doors.map((x, i) => {
       if (role !== 'adv') return { gold: x.gold, clue: x.clue };
       const k = (d.known[p.id] || {})[i];
@@ -967,15 +1196,21 @@ function viewFor(room, p) {
       round: r.round,
       dmTimedOut: !!r.dmTimedOut,
       doors: r.doors.map((x) => ({ index: x.index, lines: x.lines })),
-      rests: r.rests.map((x) => ({ id: x.id, healed: x.healed, auto: !!x.auto })),
+      rests: r.rests.map((x) => ({ id: x.id, healed: x.healed, auto: !!x.auto, follow: x.follow || null, why: x.why || null })),
+      bribes: r.bribes || [],
+      shortage: r.shortage || null,
+      pickpockets: r.pickpockets || [],
       haunts: r.haunts,
       deaths: r.deaths,
     })),
   };
   if (role === 'dm') {
+    // the purse, what it bought and the hidden gold behind each door are the DM's secret
     dv.dm = {
-      mana: d.mana, draft: d.draft, doors: d.doors, timedOut: d.dmTimedOut,
-      nextIncome: d.round < d.rounds ? C.manaIncome(d.doorsCount, d.round + 1) : 0,
+      purse: d.purse, draft: d.draft, doors: d.doors, timedOut: d.dmTimedOut, shortage: d.shortage,
+      nextIncome: d.round < d.rounds ? C.purseIncome(d.doorsCount, d.round + 1, d.rounds) : 0,
+      bribes: (d.bribes || []).map((b) => ({ id: b.id, to: b.to, door: b.door, amount: b.amount, company: b.company, delivered: !!b.delivered, answer: b.answer || null, outcome: b.outcome || null })),
+      bribesClosed: bribesClosed(room),
     };
   }
   if (role === 'ghost' && room.phase === 'adv' && d.doors) {
@@ -992,7 +1227,16 @@ function viewFor(room, p) {
       inv: s.inv, potions: s.potions, affinity: s.affinity, setupReady: s.setupReady, action: d.actions[p.id] || null,
       flasks: s.flasks, flaskCap: C.flaskCap(d.doorsCount), flasksPerRound: C.flasksPerRound(d.doorsCount),
       known: d.known[p.id] || {}, scanning: scan ? { door: scan.door, lens: scan.lens, left: Math.max(0, scan.endsAt - Date.now()) } : null,
+      plan: room.phase === 'adv' ? planOf(d, p.id) : null,
     };
+    if (room.phase === 'adv' && s.alive) {
+      // the leader learns only THAT someone follows them: never who, never how many
+      const followed = livingIds(d).some((id) => id !== p.id && followingNow(d, id) === p.id);
+      dv.mine.followed = followed ? 'on' : d.followedEver && d.followedEver[p.id] ? 'stopped' : null;
+      // bribe offers addressed to this adventurer, once delivered
+      dv.mine.offers = (d.bribes || []).filter((b) => b.to === p.id && b.delivered)
+        .map((b) => ({ id: b.id, door: b.door, amount: b.amount, company: b.company, answer: b.answer || null }));
+    }
   }
   dv.pos = d.pos;
   v.match.dungeon = dv;
@@ -1130,13 +1374,14 @@ io.on('connection', (socket) => {
     const st = d.adv[player.id];
     const it = C.SHOP[item];
     if (!st || !st.alive || !it) return;
-    if (st.gold < it.cost) return reply(cb, { error: `You need ${it.cost} gold.` });
+    const price = priceOf(d, item); // the server always charges the current price
+    if (st.gold < price) return reply(cb, { error: `You need ${price} gold.` });
     if (item === 'oil' && st.flasks >= C.flaskCap(d.doorsCount)) return reply(cb, { error: `Your lantern holds ${C.flaskCap(d.doorsCount)} flasks at most.` });
-    st.gold -= it.cost;
+    st.gold -= price;
     if (item === 'potion') st.potions++;
     else if (item === 'oil') st.flasks++;
     else st.inv[item]++;
-    shopLog(room, player.id, { bought: item, cost: it.cost });
+    shopLog(room, player.id, { bought: item, cost: price, ...(price !== it.cost ? { shortage: true } : {}) });
     reply(cb, { ok: true });
     broadcast(room);
   });
@@ -1194,24 +1439,73 @@ io.on('connection', (socket) => {
 
   socket.on('dmSubmit', (draft, cb) => {
     const { room, player, d } = ctx(socket);
-    if (!d || room.phase !== 'dm' || player.id !== d.dmId) return;
+    if (!d || player.id !== d.dmId) return;
+    // traps, fake clues and Shortages can only be set before the doors open
+    if (room.phase !== 'dm') return reply(cb, { error: 'You can only build while the doors are sealed.' });
     const v = validateDM(d, draft);
     if (!v.ok) return reply(cb, { error: v.error });
     reply(cb, { ok: true });
-    commitDM(room, v.doors, v.cost, false);
+    commitDM(room, v.doors, v.cost, false, v.shortage);
   });
 
   socket.on('action', (a, cb) => {
     const { room, player, d } = ctx(socket);
     if (!d || room.phase !== 'adv') return;
     const st = d.adv[player.id];
-    if (!st || !st.alive || st.left) return;
+    if (!st || !st.alive || st.left) return reply(cb, { error: 'Only living adventurers choose a door.' });
     const v = cleanAction(d, st, player.id, a);
     if (v.error) return reply(cb, { error: v.error });
+    const was = followingNow(d, player.id);
+    const will = v.action.type === 'follow' ? v.action.leader : null;
+    if (was !== will && followFrozen(room)) return reply(cb, { error: FROZEN });
     d.actions[player.id] = v.action;
+    if (will) d.followedEver[will] = true;
     reply(cb, { ok: true });
     broadcast(room);
     checkAdvDone(room);
+  });
+
+  // stop following (and make no other plan yet): with no plan when time runs out, you rest
+  socket.on('unfollow', (_, cb) => {
+    const { room, player, d } = ctx(socket);
+    if (!d || room.phase !== 'adv' || !d.adv[player.id]) return reply(cb, { error: 'Not now.' });
+    if (!followingNow(d, player.id)) return reply(cb, { ok: true });
+    if (followFrozen(room)) return reply(cb, { error: FROZEN });
+    if (d.actions[player.id] && d.actions[player.id].type === 'follow') delete d.actions[player.id];
+    if (d.drafts && d.drafts[player.id] && d.drafts[player.id].type === 'follow') delete d.drafts[player.id];
+    reply(cb, { ok: true });
+    broadcast(room);
+  });
+
+  /* ---------- bribes ---------- */
+  socket.on('bribe', ({ to, door, amount, company } = {}, cb) => {
+    const { room, player, d } = ctx(socket);
+    if (!d || player.id !== d.dmId) return reply(cb, { error: 'Only the DM can bribe.' });
+    if (bribesClosed(room)) return reply(cb, { error: `Bribes close ${C.BRIBE_CUTOFF} seconds before the adventurers must choose.` });
+    if (d.bribes.length >= C.BRIBES_PER_ROUND) return reply(cb, { error: `You can offer ${C.BRIBES_PER_ROUND} bribes a round.` });
+    const st = d.adv[to];
+    if (!st || !st.alive || st.left) return reply(cb, { error: 'Pick a living adventurer.' });
+    if (!Number.isInteger(door) || door < 0 || door >= d.doorsCount) return reply(cb, { error: 'Pick a door.' });
+    if (!Number.isInteger(amount) || amount < C.BRIBE_MIN) return reply(cb, { error: `A bribe is at least ${C.BRIBE_MIN} gold.` });
+    if (amount > d.purse) return reply(cb, { error: `Your purse has ${d.purse} gold.` });
+    d.purse -= amount; // reserved now, so it can never bounce
+    d.bribeSeq = (d.bribeSeq || 0) + 1;
+    const b = { id: `b${d.bribeSeq}`, to, door, amount, company: !!company, phase: room.phase, delivered: room.phase === 'adv', answer: null, outcome: null };
+    d.bribes.push(b);
+    reply(cb, { ok: true, id: b.id });
+    broadcast(room);
+  });
+
+  socket.on('bribeAnswer', ({ id, accept } = {}, cb) => {
+    const { room, player, d } = ctx(socket);
+    if (!d || room.phase !== 'adv') return reply(cb, { error: 'Not now.' });
+    const b = (d.bribes || []).find((x) => x.id === id && x.to === player.id && x.delivered);
+    if (!b) return reply(cb, { error: 'No such offer.' });
+    if (b.answer) return reply(cb, { error: 'You already answered.' });
+    b.answer = accept ? 'accepted' : 'declined';
+    if (!accept) d.purse += b.amount; // a declined bribe goes straight back to the purse
+    reply(cb, { ok: true });
+    broadcast(room);
   });
 
   // the plan as it stands, used if time runs out before locking in
@@ -1222,8 +1516,15 @@ io.on('connection', (socket) => {
     if (!st || !st.alive || st.left) return;
     const v = cleanAction(d, st, player.id, a);
     d.drafts = d.drafts || {};
+    // in the frozen last seconds a draft can't start or stop following
+    const was = followingNow(d, player.id);
+    const lockedIn = d.actions[player.id];
+    const will = lockedIn ? was : v.action && v.action.type === 'follow' ? v.action.leader : null;
+    if (was !== will && followFrozen(room)) return;
     if (v.action) d.drafts[player.id] = v.action;
     else delete d.drafts[player.id];
+    if (will) d.followedEver[will] = true;
+    if (was !== will) broadcast(room); // the leader's warning changes
   });
 
   socket.on('haunt', ({ target } = {}) => {

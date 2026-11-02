@@ -181,7 +181,6 @@ const Sprites = (() => {
     skull: [['..WWWW..', '.WWWWWW.', 'WWKWWKWW', 'WWKWWKWW', 'WWWWWWWW', '.WWKKWW.', '..WWWW..', '..W.W.W.'], { W: '#efe6cf', K: '#1d1620' }],
     heart: [['........', '.RR..RR.', 'RRRRRRRR', 'RRRRRRRR', '.RRRRRR.', '..RRRR..', '...RR...', '........'], { R: '#e0524a' }],
     crown: [['Y..Y..Y.', 'YY.YY.YY', 'YYYYYYYY', 'YRYYGYRY', 'YYYYYYYY', '........', '........', '........'], { Y: '#f5c542', R: '#e0524a', G: '#4c9a4f' }],
-    mana: [['...MM...', '..MMMM..', '.MMWMMM.', 'MMWMMMMM', 'MMMMMMMM', '.MMMMMM.', '..MMMM..', '...MM...'], { M: '#8f7bff', W: '#e3dcff' }],
     hourglass: [['KKKKKKKK', '.KYYYYK.', '..KYYK..', '...KK...', '...KK...', '..K..K..', '.KYYYYK.', 'KKKKKKKK'], { K: '#c9a35a', Y: '#f5c542' }],
     none: [['........', '..WWWW..', '.W....W.', '.....W..', '....W...', '........', '....W...', '........'], { W: '#a9a48f' }],
     shield: [['KKKKKKKK', 'KSSSSSSK', 'KSWSSSSK', 'KSWSSSSK', 'KSSSSSSK', '.KSSSSK.', '..KSSK..', '...KK...'], { S: '#9aa3b5', W: '#e3e8f2', K: '#3a3f55' }],
