@@ -66,8 +66,15 @@ const C = {
 
   // scanning doors with the lantern
   SCAN_MS: 3000,                                   // how long a scan takes
+  // oil for the lantern: a fresh supply each round, one flask fewer than there are doors, and no
+  // carrying over, so there is always a door you can't scan (ask the statue about it, or guess)
   flasksPerRound: (doors) => Math.max(1, doors - 1),
-  flaskCap: (doors) => doors,                      // the most oil you can carry
+  // the DM's statue: each adventurer may ask it one question a round. The DM taps Truth or Lie, but
+  // only has a few lies a round; the answer always arrives STATUE_DELAY_MS after the question
+  // (scaled), however fast the DM taps, and is the truth if the DM doesn't answer in time.
+  STATUE_QUESTIONS: 1,
+  statueLies: (advs) => (advs >= 5 ? 2 : 1),
+  STATUE_DELAY_MS: 4000,
   MIN_DOOR_GOLD: 10,
 
   TRAPS: {
@@ -97,10 +104,9 @@ const C = {
   // shop prices: cheap for items that cause infighting, expensive for items that only protect
   SHOP: {
     potion: { name: 'Potion', cost: 12, text: 'Heal 40 HP. Drink any time during your turn.' },
-    oil: { name: 'Oil flask', cost: 7, text: 'Fuel for one more lantern scan. You can carry as many flasks as there are doors.' },
     armour: { name: 'Armour', cost: 14, text: 'Take half damage this round.' },
     charm: { name: 'Charm', cost: 8, text: 'Resist one element of your choice this round.' },
-    lens: { name: 'Lens', cost: 12, text: 'Fit it to your lantern: your next scan shows the real trap and its strength, even through a fake clue.' },
+    lens: { name: 'Lens', cost: 12, text: 'Fit it to your lantern: your next scan shows the real trap and its strength, even through a fake clue. It still takes a flask of oil, and works once a round.' },
     lock: { name: 'Lock', cost: 15, text: 'Enter alone and take all the gold. Others on that door are locked out. You take 2.5× damage.' },
     shove: { name: 'Shove', cost: 5, text: 'If your target picks your door, they spring the trap alone at 1.5×, and you pickpocket 10% of their gold.' },
   },
@@ -152,9 +158,13 @@ const ROOM = {
   MOVE_MIN_MS: 70,
 };
 const FACING = ['up', 'down', 'left', 'right'];
-// everyone starts along the bottom of the room, clear of the shop counter and the barrels
+// everyone starts in an arc below the campfire, clear of the stall and statue corners, and far
+// enough apart (45+ room pixels with up to 5 adventurers) that nobody starts within whispering range
 function defaultSpot(k, m) {
-  return { x: m <= 1 ? 0.6 : 0.3 + (0.56 * k) / (m - 1), y: 0.94, d: 'up' };
+  const deg = m <= 1 ? 90 : 15 + (150 * k) / (m - 1);
+  const px = 192 + 92 * Math.cos((deg * Math.PI) / 180);
+  const py = 256 + 58 * Math.sin((deg * Math.PI) / 180);
+  return { x: (px - 26) / 332, y: (py - 118) / 248, d: 'up' };
 }
 function nearEnough(a, b) {
   if (!a || !b) return false;
@@ -168,6 +178,7 @@ const PUBLIC_CONFIG = {
   MIN_ROUNDS: C.MIN_ROUNDS, MAX_ROUNDS: C.MAX_ROUNDS,
   START_HP: C.START_HP, START_GOLD: C.START_GOLD, START_POTIONS: C.START_POTIONS,
   POTION_HEAL: C.POTION_HEAL, POTION_CAP: C.POTION_CAP, REST_HEAL: C.REST_HEAL,
+  STATUE_QUESTIONS: C.STATUE_QUESTIONS, STATUE_DELAY_MS: C.STATUE_DELAY_MS * Number(process.env.TIME_SCALE || 1),
   MIN_DOOR_GOLD: C.MIN_DOOR_GOLD, TRAPS: C.TRAPS, ILLUSION_COST: C.ILLUSION_COST,
   APPROACH: C.APPROACH, ROOM_BAGS: C.ROOM_BAGS, LOCK_MULT: C.LOCK_MULT, SHOVE_MULT: C.SHOVE_MULT,
   RESIST: C.RESIST, WEAK: C.WEAK, CHARM: C.CHARM, ARMOUR: C.ARMOUR,
@@ -369,6 +380,29 @@ function dlog(room) {
   const L = room.match.log.dungeons;
   return L[L.length - 1];
 }
+/* ---------- the DM's statue ---------- */
+// the statue stands in the bottom-right corner; you ask it from just above or to the left of it
+function nearStatue(p) {
+  return !!p && p.x >= 0.76 && p.y >= 0.68;
+}
+// the true answer to "Is Door X trapped?" or "Is Door X trapped with this element?"
+function statueTruth(d, door, element) {
+  const t = d.doors && d.doors[door] && d.doors[door].trap;
+  return element ? !!t && t.element === element : !!t;
+}
+function clearStatue(d) {
+  for (const a of (d.statue && d.statue.asks) || []) clearTimeout(a.timer);
+}
+// the answer arrives on time whatever the DM did: their choice, or the truth if they didn't choose
+function deliverStatue(room, a) {
+  const d = room.match && room.match.dungeon;
+  if (!d || a.delivered) return;
+  if (!a.choice) { a.choice = 'truth'; a.untapped = true; }
+  a.answer = a.choice === 'lie' ? !a.truth : a.truth;
+  a.delivered = true;
+  broadcast(room);
+}
+
 /* ---------- scanning doors with the lantern ---------- */
 const scanMs = () => Math.round(C.SCAN_MS * TIME_SCALE);
 // a door's position across the room floor, in the same 0..1 units as positions (see public/room.js)
@@ -384,7 +418,7 @@ function stopScan(room, pid, refund, reason) {
   delete d.scans[pid];
   if (refund && d.adv[pid]) {
     d.adv[pid].flasks += 1;
-    if (scan.lens) d.adv[pid].inv.lens += 1;
+    if (scan.lens) { d.adv[pid].inv.lens += 1; if (d.lensUsed) delete d.lensUsed[pid]; }
   }
   io.to(room.code).emit('scan', { id: pid, door: scan.door, on: false });
   const p = room.players.find((x) => x.id === pid);
@@ -396,7 +430,7 @@ function stopAllScans(d, refund) {
     clearTimeout(scan.timer);
     if (refund && d.adv[pid]) {
       d.adv[pid].flasks += 1;
-      if (scan.lens) d.adv[pid].inv.lens += 1;
+      if (scan.lens) { d.adv[pid].inv.lens += 1; if (d.lensUsed) delete d.lensUsed[pid]; }
     }
   }
   d.scans = {};
@@ -453,10 +487,10 @@ function startRound(room) {
   d.purseIncome = C.purseIncome(d.doorsCount, d.round, d.rounds);
   d.purse += d.purseIncome; // unspent purse carries over
   d.purseStart = d.purse;
-  // fresh oil every round, up to what a lantern can carry
+  // fresh oil every round; whatever was left over is gone
   for (const id of livingIds(d)) {
     const st = d.adv[id];
-    st.flasks = Math.min(C.flaskCap(d.doorsCount), (st.flasks || 0) + C.flasksPerRound(d.doorsCount));
+    st.flasks = C.flasksPerRound(d.doorsCount); // unused oil doesn't carry over
   }
   stopAllScans(d, false);
   d.known = {};
@@ -469,6 +503,9 @@ function startRound(room) {
   d.ghostDone = {};
   d.followedEver = {}; // who has been followed at some point this round (for the "stopped" warning)
   d.bribes = [];
+  d.lensUsed = {};      // a Lens works once a round
+  clearStatue(d);
+  d.statue = { asks: [], liesUsed: 0, liesMax: C.statueLies(livingIds(d).length), seq: 0 };
 
   d.lastResult = null;
   resetSpots(d);
@@ -647,6 +684,9 @@ function resolveRound(room) {
   if (room.phase !== 'adv') return;
   const d = room.match.dungeon;
   for (const pid of Object.keys(d.scans || {})) stopScan(room, pid, true, 'time');
+  // the doors open: answers still on their way are cut off
+  clearStatue(d);
+  for (const a of (d.statue && d.statue.asks) || []) if (!a.delivered) a.cutOff = true;
   const living = livingIds(d);
   const ghosts = ghostIds(d);
   const before = {};
@@ -965,6 +1005,14 @@ function logRound(room, d, r) {
     leftBehind: x.left,
     story: x.lines.join(' '),
   }));
+  const elName = (e) => (e ? e[0].toUpperCase() + e.slice(1) : '');
+  entry.statue = ((d.statue && d.statue.asks) || []).map((a) => ({
+    asker: n(a.from), question: `Door ${ROMAN[a.door]} trapped${a.element ? ` with ${elName(a.element)}` : ''}?`,
+    truth: a.truth ? 'yes' : 'no',
+    told: a.cutOff ? 'no answer (the doors opened first)' : a.answer ? 'yes' : 'no',
+    lie: !a.cutOff && a.choice === 'lie', dm: a.untapped || !a.choice ? 'no tap (truth)' : a.choice,
+  }));
+  if (d.statue) entry.statueLies = { used: d.statue.liesUsed, max: d.statue.liesMax };
   entry.bribes = (d.bribes || []).map((b) => ({
     to: n(b.to), door: ROMAN[b.door], amount: b.amount, company: b.company, offered: b.phase === 'dm' ? 'while setting traps' : 'while choosing',
     answer: b.answer || 'no answer', outcome: b.answer === 'declined' ? 'returned to the purse' : b.outcome === 'paid' ? 'paid' : `${b.outcome || 'did not go'}, returned to the purse`,
@@ -1043,6 +1091,7 @@ function afterResults(room) {
 function endDungeon(room, early) {
   const m = room.match;
   const d = m.dungeon;
+  clearStatue(d);
   const N = d.advIds.length;
   let T = d.T;
   if (early) {
@@ -1207,6 +1256,10 @@ function viewFor(room, p) {
       nextIncome: d.round < d.rounds ? C.purseIncome(d.doorsCount, d.round + 1, d.rounds) : 0,
       bribes: (d.bribes || []).map((b) => ({ id: b.id, to: b.to, door: b.door, amount: b.amount, company: b.company, delivered: !!b.delivered, answer: b.answer || null, outcome: b.outcome || null })),
       bribesClosed: bribesClosed(room),
+      statue: d.statue ? {
+        liesMax: d.statue.liesMax, liesLeft: d.statue.liesMax - d.statue.liesUsed,
+        asks: d.statue.asks.map((a) => ({ id: a.id, from: a.from, door: a.door, element: a.element, truth: a.truth, choice: a.choice, delivered: a.delivered, left: a.delivered ? 0 : Math.max(0, a.dueAt - Date.now()) })),
+      } : null,
     };
   }
   if (role === 'ghost' && room.phase === 'adv' && d.doors) {
@@ -1221,14 +1274,23 @@ function viewFor(room, p) {
     const scan = d.scans && d.scans[p.id];
     dv.mine = {
       inv: s.inv, potions: s.potions, affinity: s.affinity, setupReady: s.setupReady, action: d.actions[p.id] || null,
-      flasks: s.flasks, flaskCap: C.flaskCap(d.doorsCount), flasksPerRound: C.flasksPerRound(d.doorsCount),
+      flasks: s.flasks, flasksPerRound: C.flasksPerRound(d.doorsCount), lensUsed: !!(d.lensUsed && d.lensUsed[p.id]),
       known: d.known[p.id] || {}, scanning: scan ? { door: scan.door, lens: scan.lens, left: Math.max(0, scan.endsAt - Date.now()) } : null,
       plan: room.phase === 'adv' ? planOf(d, p.id) : null,
     };
+    if (['results', 'dungeonEnd'].includes(room.phase) && d.statue) {
+      // the reveal tells each asker, privately, whether the statue lied to them
+      dv.mine.statueRecap = d.statue.asks.filter((a) => a.from === p.id)
+        .map((a) => ({ door: a.door, element: a.element, answer: a.cutOff ? null : a.answer, lied: !a.cutOff && a.choice === 'lie' }));
+    }
     if (room.phase === 'adv' && s.alive) {
       // the leader learns only THAT someone follows them: never who, never how many
       const followed = livingIds(d).some((id) => id !== p.id && followingNow(d, id) === p.id);
       dv.mine.followed = followed ? 'on' : d.followedEver && d.followedEver[p.id] ? 'stopped' : null;
+      // this adventurer's statue questions; the answer only once it has arrived
+      dv.mine.statue = (d.statue ? d.statue.asks : []).filter((a) => a.from === p.id)
+        .map((a) => ({ id: a.id, door: a.door, element: a.element, answer: a.delivered ? a.answer : null, delivered: a.delivered, left: a.delivered ? 0 : Math.max(0, a.dueAt - Date.now()) }));
+      dv.mine.canAsk = !!d.statue && dv.mine.statue.length < C.STATUE_QUESTIONS;
       // bribe offers addressed to this adventurer, once delivered
       dv.mine.offers = (d.bribes || []).filter((b) => b.to === p.id && b.delivered)
         .map((b) => ({ id: b.id, door: b.door, amount: b.amount, company: b.company, answer: b.answer || null }));
@@ -1372,11 +1434,9 @@ io.on('connection', (socket) => {
     if (!st || !st.alive || !it) return;
     const price = priceOf(d, item); // the server always charges the current price
     if (st.gold < price) return reply(cb, { error: `You need ${price} gold.` });
-    if (item === 'oil' && st.flasks >= C.flaskCap(d.doorsCount)) return reply(cb, { error: `Your lantern holds ${C.flaskCap(d.doorsCount)} flasks at most.` });
     if (item === 'potion' && st.potions >= C.POTION_CAP) return reply(cb, { error: `You can carry ${C.POTION_CAP} Potions at most.` });
     st.gold -= price;
     if (item === 'potion') st.potions++;
-    else if (item === 'oil') st.flasks++;
     else st.inv[item]++;
     shopLog(room, player.id, { bought: item, cost: price });
     reply(cb, { ok: true });
@@ -1407,12 +1467,14 @@ io.on('connection', (socket) => {
     if (!nearDoor(d, d.pos[player.id], door)) return reply(cb, { error: 'Walk right up to the door first.' });
     const known = (d.known[player.id] || {})[door];
     if (known && (!lens || known.lens)) return reply(cb, { error: 'You already scanned this door.' });
-    if (st.flasks < 1) return reply(cb, { error: 'Your lantern is out of oil. The shopkeeper sells more.' });
+    // every scan takes a flask, a Lens scan too, so the Lens can't reach the door your oil can't
+    if (st.flasks < 1) return reply(cb, { error: 'Your lantern is out of oil until next round. Ask the statue instead.' });
     if (lens && st.inv.lens < 1) return reply(cb, { error: 'You have no Lens.' });
+    if (lens && d.lensUsed && d.lensUsed[player.id]) return reply(cb, { error: 'A Lens works once a round.' });
     const ms = scanMs();
     if (room.deadline && room.deadline - Date.now() < ms + Math.round(250 * TIME_SCALE)) return reply(cb, { error: 'Not enough time left to scan.' });
     st.flasks -= 1;
-    if (lens) st.inv.lens -= 1;
+    if (lens) { st.inv.lens -= 1; d.lensUsed[player.id] = true; }
     const scan = { door, lens: !!lens, endsAt: Date.now() + ms };
     scan.timer = setTimeout(() => finishScan(room, player.id), ms);
     d.scans[player.id] = scan;
@@ -1470,6 +1532,40 @@ io.on('connection', (socket) => {
     if (followFrozen(room)) return reply(cb, { error: FROZEN });
     if (d.actions[player.id] && d.actions[player.id].type === 'follow') delete d.actions[player.id];
     if (d.drafts && d.drafts[player.id] && d.drafts[player.id].type === 'follow') delete d.drafts[player.id];
+    reply(cb, { ok: true });
+    broadcast(room);
+  });
+
+  /* ---------- the DM's statue ---------- */
+  socket.on('statueAsk', ({ door, element } = {}, cb) => {
+    const { room, player, d } = ctx(socket);
+    if (!d || room.phase !== 'adv' || !d.statue) return reply(cb, { error: 'The statue only answers while you choose.' });
+    const st = d.adv[player.id];
+    if (!st || !st.alive || st.left) return reply(cb, { error: 'Only living adventurers can ask the statue.' });
+    if (!nearStatue(d.pos[player.id])) return reply(cb, { error: 'Walk up to the statue first.' });
+    if (d.statue.asks.filter((a) => a.from === player.id).length >= C.STATUE_QUESTIONS) return reply(cb, { error: 'The statue answers one question a round.' });
+    if (!Number.isInteger(door) || door < 0 || door >= d.doorsCount) return reply(cb, { error: 'Pick a door.' });
+    if (element !== null && element !== undefined && !ELEMENTS.includes(element)) return reply(cb, { error: 'Pick an element.' });
+    const delay = Math.round(C.STATUE_DELAY_MS * TIME_SCALE);
+    if (msLeft(room) < delay + Math.round(1000 * TIME_SCALE)) return reply(cb, { error: 'The statue has fallen silent: too little time left.' });
+    d.statue.seq += 1;
+    const a = { id: `s${d.statue.seq}`, from: player.id, door, element: element || null, truth: statueTruth(d, door, element || null), choice: null, answer: null, delivered: false, dueAt: Date.now() + delay };
+    a.timer = setTimeout(() => deliverStatue(room, a), delay);
+    d.statue.asks.push(a);
+    reply(cb, { ok: true, id: a.id });
+    broadcast(room);
+  });
+
+  socket.on('statueAnswer', ({ id, lie } = {}, cb) => {
+    const { room, player, d } = ctx(socket);
+    if (!d || room.phase !== 'adv' || player.id !== d.dmId || !d.statue) return reply(cb, { error: 'Not now.' });
+    const a = d.statue.asks.find((x) => x.id === id);
+    if (!a || a.delivered) return reply(cb, { error: 'Too late: that answer has gone.' });
+    if (a.choice) return reply(cb, { error: 'You already answered.' });
+    if (lie && d.statue.liesUsed >= d.statue.liesMax) return reply(cb, { error: 'No lies left this round.' });
+    a.choice = lie ? 'lie' : 'truth';
+    if (lie) d.statue.liesUsed += 1;
+    // the answer still waits for its fixed time, so how fast the DM tapped gives nothing away
     reply(cb, { ok: true });
     broadcast(room);
   });

@@ -7,12 +7,19 @@ const Room = (() => {
   const FX0 = 26, FX1 = 358, FY0 = 118, FY1 = 366;    // where feet can go
   const SPEED = 150;                                  // room pixels per second
   const FIRE = { x: 192, y: 252, r: 20 };
-  const SHOPKEEPER = { x: 62, y: 300 };
-  const SHOP_SPOT = { x: 64, y: 346 };                // stand here to shop
-  const BLOCKS = [
-    { x0: 18, x1: 108, y0: 288, y1: 330 },            // the counter
-    { x0: 324, x1: 372, y0: 326, y1: 372 },           // barrels
-  ];
+  // the shop stall fills the bottom-left corner: an L-shaped counter open to the room above and to
+  // its right, with the shopkeeper inside. The DM's statue mirrors it in the bottom-right corner.
+  const STALL = { x0: 18, x1: 98, y0: 314, y1: 372 };
+  const SHOPKEEPER = { x: 50, y: 360 };
+  const SHOP_SPOT = { x: 58, y: 298 };                // just above the counter
+  const STATUE = { x: 340, y: 356 };                  // where the statue's plinth stands
+  const PLINTH = { x0: 312, x1: 372, y0: 318, y1: 372 };
+  const STATUE_SPOT = { x: 294, y: 334 };             // beside the plinth, so the statue never hides your name
+  const BLOCKS = [STALL, PLINTH];
+  // standing anywhere in these corners (outside the stall or plinth) lets you use them
+  // (a little stricter than the server's statue zone, so anything offered here is always accepted)
+  const nearStall = (p) => p.x < 130 && p.y > 290;
+  const nearStatue = (p) => p.x > 284 && p.y > 290;
   const NEAR = 36; // a bit stricter than the server's 44, so anything offered here is always accepted
   const ROMAN = ['I', 'II', 'III', 'IV', 'V', 'VI'];
   const SHORT_CLUE = { fire: 'Smoke', water: 'Dripping', earth: 'Rumbling', air: 'Draft', none: 'Silent' };
@@ -96,8 +103,10 @@ const Room = (() => {
         <div class="say" hidden></div>
         ${Sprites.merchant(3)}
       </div>
-      <div class="r-counter" style="z-index:330"><span>Shop</span></div>
-      <div class="r-barrel" style="left:334px; top:332px"></div><div class="r-barrel" style="left:352px; top:346px"></div>
+      <div class="r-counter top" style="z-index:${STALL.y0 + 12}"><span>Shop</span></div>
+      <div class="r-counter side" style="z-index:${STALL.y1}"></div>
+      <div class="r-statue" style="left:${STATUE.x}px; top:${STATUE.y - 6}px; z-index:${STATUE.y}">${Sprites.statue(3)}</div>
+      <div class="r-plinth" style="z-index:${STATUE.y + 1}"><span>Statue</span></div>
       <div class="r-voice" hidden></div>
       <div class="r-vignette"></div>`);
     merchantEl = inner.querySelector('.r-keeper');
@@ -441,7 +450,8 @@ const Room = (() => {
       const phase = S.phase;
       const alive = !mine.ghost;
       const nd = S.match.dungeon.doorsCount;
-      if (alive && dist(mine, SHOP_SPOT) < 40) n = { type: 'shop' };
+      if (alive && nearStall(mine)) n = { type: 'shop' };
+      if (!n && alive && phase === 'adv' && nearStatue(mine)) n = { type: 'statue' };
       if (!n && alive && phase === 'adv' && mine.y < WALL + 42) {
         for (let i = 0; i < nd; i++) if (Math.abs(mine.x - doorX(i, nd)) < 28) n = { type: 'door', i };
       }
@@ -486,7 +496,8 @@ const Room = (() => {
         return;
       }
     }
-    if (pt.x < 110 && pt.y > 250 && pt.y < 334) { goTo({ ...SHOP_SPOT }); return; }
+    if (pt.x < STALL.x1 + 10 && pt.y > STALL.y0 - 50) { goTo({ ...SHOP_SPOT }); return; }
+    if (pt.x > PLINTH.x0 - 10 && pt.y > PLINTH.y0 - 60) { goTo({ ...STATUE_SPOT }); return; }
     const nd = S.match.dungeon.doorsCount;
     if (pt.y < WALL + 8) {
       for (let i = 0; i < nd; i++) if (Math.abs(pt.x - doorX(i, nd)) < 30) { goTo({ x: doorX(i, nd), y: WALL + 22 }); return; }
@@ -563,8 +574,12 @@ const Room = (() => {
     keysDown.clear();
     send(performance.now());
   }
+  // where to walk to use the shop and the statue, in the 0..1 floor units positions use
+  const norm = (p) => ({ x: (p.x - FX0) / (FX1 - FX0), y: (p.y - FY0) / (FY1 - FY0) });
+  const shopSpot = () => norm(SHOP_SPOT);
+  const statueSpot = () => norm(STATUE_SPOT);
   return {
-    mount, update, setActive, setPos, say, walkTo, fit, setScan, setMyScan, flushPos,
+    mount, update, setActive, setPos, say, walkTo, fit, setScan, setMyScan, flushPos, shopSpot, statueSpot,
     onCancelScan: (fn) => { on.cancelScan = fn; },
     onDoorTap: (fn) => { on.doorTap = fn; },
     onSend: (fn) => { on.send = fn; },

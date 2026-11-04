@@ -167,6 +167,28 @@ const Sprites = (() => {
     'KKKKKKDDDDDDDDDDDDKKKKKK',
     'KKKKKKKKDDDDDDDDKKKKKKKK',
   ];
+  // the DM's statue: a hooded stone figure whose eyes still glow
+  const STATUE = [
+    '....SSSS....',
+    '...SSSSSS...',
+    '..SSDDDDSS..',
+    '..SDEDDEDS..',
+    '..SDDDDDDS..',
+    '..SSDDDDSS..',
+    '.SSSSSSSSSS.',
+    'SSSLSSSSLSSS',
+    'SSSLSSSSLSSS',
+    '.SSLSSSSLSS.',
+    '.SSSSSSSSSS.',
+    '.SSSLSSLSSS.',
+    '..SSSSSSSS..',
+    '..SSLSSLSS..',
+    '.SSSSSSSSSS.',
+    '.SSSSSSSSSS.',
+  ];
+  function statue(scale = 3) {
+    return pix(STATUE, { S: '#8f93a3', L: '#6c7080', D: '#2a2c36', E: '#ff5f4a' }, scale, '');
+  }
   function dmHood(scale = 5) {
     return pix(HOOD, { K: '#151520', D: '#07070c', E: '#ff5f4a' }, scale, '');
   }
@@ -200,6 +222,8 @@ const Sprites = (() => {
     // a coin held out on an open palm: the DM's Bribe screen
     bribe: [['...GGG..', '..GYWYG.', '..GYYYG.', '...GGG..', 'S......S', 'SS....SS', 'SSSSSSSS', '.SSSSSS.'], { G: '#a8761c', Y: '#f5c542', W: '#fff4c2', S: '#e0b088' }],
     // a sealed letter: an adventurer's secret Offers
+    // the statue on the sidebar: a stone hood with glowing eyes
+    statue: [['..KKKK..', '.KKKKKK.', 'KKDDDDKK', 'KDEDDEDK', 'KDDDDDDK', '.KKKKKK.', 'KKKKKKKK', 'KKKKKKKK'], { K: '#9aa0b0', D: '#2a2c36', E: '#ff5f4a' }],
     letter: [['........', 'PPPPPPPP', 'PKPPPPKP', 'PPKPPKPP', 'PPPRRPPP', 'PPPRRPPP', 'PPPPPPPP', '........'], { P: '#e9d7a8', K: '#7a6a4a', R: '#e0524a' }],
     zz: [['ZZZZ....', '..Z.....', '.Z......', 'ZZZZ.ZZZ', '......Z.', '.....ZZZ', '........', '........'], { Z: '#c3b6ff' }],
   };
@@ -233,5 +257,5 @@ const Sprites = (() => {
   const FLAME = [['..Y...', '.YY.Y.', '.YOY..', 'YOOOY.', 'YORROY', '.YRRY.'], { Y: '#ffd45e', O: '#ff9a2e', R: '#e8552b' }];
   function flame(scale = 4) { return pix(FLAME[0], FLAME[1], scale, ''); }
 
-  return { CLOAKS, ELEMENT, adventurer, walker, sitting, portrait, ghost, dmHood, merchant, lantern, icon, flame };
+  return { CLOAKS, ELEMENT, adventurer, walker, sitting, portrait, ghost, dmHood, statue, merchant, lantern, icon, flame };
 })();

@@ -61,9 +61,9 @@ Everything fits in one window, with no scrolling:
 
 ## The room
 
-Adventurers spend each round in a top-down stone room: the doors along the top wall, a campfire in the middle, and the shopkeeper behind a counter in the corner. Everyone sees everyone else walk around in real time.
+Adventurers spend each round in a top-down stone room: the doors along the top wall, a campfire in the middle, the shopkeeper inside an L-shaped stall in the bottom-left corner (you shop from above it or from its right), and the DM's statue on its plinth in the bottom-right corner. Everyone sees everyone else walk around in real time.
 
-- **Walking:** arrow keys or WASD, or click or tap where to go (tap-to-walk routes around the fire, counter and barrels).
+- **Walking:** arrow keys or WASD, or click or tap where to go (tap-to-walk routes around the fire, the stall and the statue).
 - **The action button** (or E) does whatever you're next to: Shop, Scan Door II or Choose Door II, Rest by the fire, or Whisper to someone beside you.
 - **Your plan** stays secret; where you stand means nothing, so standing at a door is a free bluff. If time runs out, the plan you've filled in counts even if you didn't lock it in. Instead of a door, your plan can be to follow someone (see below).
 
@@ -107,8 +107,9 @@ The doors open one at a time. When the reveal ends, a 10-second reading pause st
 
 Every door shows its gold, but its clue stays hidden until you scan it. The server never sends an unscanned clue to anyone's browser.
 
-- **Scanning:** walk up to a door and use **Scan** (E on a computer). It takes 3 seconds and one oil flask. A close-up opens over part of the room: the door turns see-through, and the clue's atmosphere and rune appear. Only you see the result; everyone else sees a plain white lantern beam on that door.
-- **Oil:** each round you get one fewer flask than there are doors, and you can carry as many flasks as there are doors. The shopkeeper sells extra flasks.
+- **Scanning:** walk up to a door and use **Scan** (E on a computer). It takes 3 seconds and one oil flask, a Lens scan too. A close-up opens over part of the room: the door turns see-through, and the clue's atmosphere and rune appear. Only you see the result; everyone else sees a plain white lantern beam on that door.
+- **Oil:** each round you get one fewer flask than there are doors, and unused oil doesn't carry over, so there is always a door you can't scan. Oil isn't sold. A Lens works once a round and still takes a flask, so it can't reach the door your oil can't.
+- **The statue:** walk up to the DM's statue and ask it one question a round about any door: is it trapped, or trapped with a given element? The DM gets a card in their action bar and taps Truth or Lie, with 1 lie a round (2 with five or more adventurers). Every answer arrives 4 seconds after the question, however fast the DM tapped, so timing gives nothing away; if the DM doesn't tap, it's the truth. Only you see your question and answer (it also goes in your journal), everyone can see who walks to the statue, and at the reveal you privately learn whether it lied to you.
 - **Illusions fool scans.** A **Lens** fixes that: turn it on in the action bar before scanning, and the scan shows the real trap and its strength. If the clue was fake, you see it shatter.
 - **Rules that keep it fair:** you can't start a scan with less than 3 seconds left. Walking away, pressing Stop, or running out of time cancels the scan and gives the oil back. The result only arrives once the server's own 3 seconds have passed.
 
@@ -139,7 +140,7 @@ Between dungeons, at the end of the match, and back in the lobby afterwards, any
 - `public/index.html`: the page shell.
 - `public/style.css`: the dungeon look (stone, doors, torches, windows, buttons).
 - `public/sprites.js`: original pixel-art adventurers, ghosts, the DM, and icons, drawn from small pixel maps. Edit a map to change a sprite.
-- `public/room.js`: the top-down room: walking (tap-to-walk routes around the fire, counter and barrels), collision, the shopkeeper, the campfire, lantern beams, and what you're standing next to.
+- `public/room.js`: the top-down room: walking (tap-to-walk routes around the fire, the stall and the statue), collision, the shopkeeper, the statue, the campfire, lantern beams, and what you're standing next to.
 - `public/scanview.js`: the lantern close-up shown while scanning a door.
 - `public/manifest.webmanifest` and `public/icons/`: lets the game be added to a phone's home screen.
 - `public/scene.js`: the side-view door hall: the DM's builder and the animated reveal each round (movement by speed, doors opening, element trap effects, coins, haunts, deaths). Has Skip and Replay, and players with "reduce motion" turned on go straight to the result.
@@ -163,9 +164,10 @@ For quick solo testing, `TIME_SCALE=0.2 npm start` makes every timer five times 
 - Adventurers secretly pick a door and Sprint (3 bags, ×1.5), Walk (2 bags, ×1) or Sneak (1 bag, ×0.5), or Rest (+10 HP).
 - Only the fastest group into a room springs the trap. A room needs 3 bags to empty; with more, gold splits by bags.
 - Elements: your element resists itself (×0.5) and is weak to the one that beats it (×1.5). Water > Fire > Air > Earth > Water.
-- Items are single use and last the whole dungeon. First-round prices: Shove 5, Oil flask 7, Charm 8, Potion 12, Lens 12, Armour 14, Lock 15. Prices rise every round, to 50% more by the last round (the shop shows next round's price), so buying early is cheaper. You can carry at most 2 Potions.
+- Items are single use and last the whole dungeon. First-round prices: Shove 5, Charm 8, Potion 12, Lens 12, Armour 14, Lock 15. Prices rise every round, to 50% more by the last round (the shop shows next round's price), so buying early is cheaper. You can carry at most 2 Potions.
 - A Shove that lands also pickpockets 10% of the target's gold after the loot. A Lock on that door stops it.
 - Instead of a door, you can secretly follow another adventurer: you copy their final door and speed, not their items. The leader only learns that someone follows them. No starting or stopping in the last 10 seconds, and no shoving along a following link.
+- Scanning a door takes a flask; you get one flask fewer than there are doors each round and can't buy more. Each adventurer may also ask the DM's statue one question a round about a door; the DM answers truthfully or lies (1 lie a round, 2 with five or more adventurers).
 - The DM can secretly bribe up to 2 adventurers a round to pick a door (from 3 gold, out of the purse). It's paid on entry, before any trap, and returns to the purse otherwise.
 - At each door, in order: bribes paid, trap damage, loot (the dead get none), pickpocketing, haunts, then deaths drop half their gold.
 - While the shop is open, you see other players' gold and HP as they were when trap-setting began. Real values show at the reveal.

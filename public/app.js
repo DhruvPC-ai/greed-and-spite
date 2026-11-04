@@ -72,6 +72,7 @@ socket.on('state', (v) => {
   store.set('gs_code', v.code);
   syncLocal();
   syncFollowAndOffers();
+  syncStatue();
   if (S.phase === 'lobby' && !store.get('gs_tut_seen') && !Tutorial.isOpen()) openTutorial(0);
   const sk = D() ? `${S.phase}:${S.match.dIndex}:${D().round}:${D().role}` : S.phase;
   if (sk !== ui.sheetKey) {
@@ -153,6 +154,7 @@ function roomAction() {
   const n = ui.near;
   if (!n) return;
   if (n.type === 'shop') { openSheet('shop'); merchantTalk(); }
+  else if (n.type === 'statue') openSheet('statue');
   else if (n.type === 'door') { if (scanState(n.i).ok) startScan(n.i); else chooseDoor(n.i); }
   else if (n.type === 'fire') restNow();
   else if (n.type === 'person') { ui.whisperTo = n.id; ui.whisperPick = null; openSheet('talk'); }
@@ -172,11 +174,11 @@ function scanState(i) {
   if (!d || d.role !== 'adv' || S.phase !== 'adv') return { ok: false, label: '' };
   const mine = d.mine;
   const R = ROMAN[i];
-  const lensOn = ui.useLens && mine.inv.lens > 0;
+  const lensOn = ui.useLens && mine.inv.lens > 0 && !mine.lensUsed;
   const k = mine.known[i];
   if (mine.scanning) return { ok: false, label: 'Scanning…' };
   if (k && !(lensOn && !k.lens)) return { ok: false, label: `Door ${R} scanned` };
-  if (mine.flasks < 1) return { ok: false, label: 'Out of oil' };
+  if (mine.flasks < 1) return { ok: false, label: 'Out of oil this round' };
   const left = S.deadline ? S.deadline - (Date.now() + clockOffset) : 1e9;
   if (left < cfg().SCAN_MS + 400) return { ok: false, label: 'No time to scan' };
   return { ok: true, label: lensOn ? `Scan Door ${R} with Lens` : `Scan Door ${R}`, lens: lensOn };
@@ -338,6 +340,20 @@ function syncLocal() {
     ui.whisperTo = null;
     ui.whisperPick = null;
     ui.whispers = [];
+  }
+}
+function syncStatue() {
+  const d = D();
+  if (!d || S.phase !== 'adv') return;
+  ui.statueSeen = ui.statueSeen || new Set();
+  const seen = (key) => { if (ui.statueSeen.has(key)) return true; ui.statueSeen.add(key); return false; };
+  const round = `${S.match.dIndex}-${d.round}`;
+  if (d.role === 'dm' && d.dm && d.dm.statue) {
+    // just a sound: a toast would cover the Truth and Lie buttons the DM has a few seconds to tap
+    for (const a of d.dm.statue.asks) if (!a.delivered && !seen(`${round}-q-${a.id}`)) Sound.play('click');
+  }
+  if (d.role === 'adv' && d.mine) {
+    for (const a of d.mine.statue || []) if (a.delivered && !seen(`${round}-a-${a.id}`)) { Sound.play('click'); toast(`The statue says: ${a.answer ? 'Yes' : 'No'}.`, 'info'); }
   }
 }
 function syncFollowAndOffers() {
@@ -690,7 +706,7 @@ function renderShop() {
   const mine = d.mine;
   const me = advOf(S.me);
   const items = Object.entries(c.SHOP).map(([k, it]) => {
-    const owned = k === 'potion' ? `${mine.potions} of ${c.POTION_CAP}` : k === 'oil' ? `${mine.flasks} of ${mine.flaskCap}` : mine.inv[k];
+    const owned = k === 'potion' ? `${mine.potions} of ${c.POTION_CAP}` : mine.inv[k];
     // prices rise every round; show next round's so buying early can be weighed
     const price = (d.prices && d.prices[k]) || it.cost;
     const next = d.nextPrices && d.nextPrices[k] > price ? d.nextPrices[k] : null;
@@ -698,7 +714,7 @@ function renderShop() {
       <div class="top"><span>${it.name}</span><span class="gold price">${Sprites.icon('coin', 2)} <b>${price}</b>${next ? `<span class="next-price" title="Next round’s price">→ ${next}</span>` : ''}</span></div>
       <p>${it.text}</p>
       <div class="row">
-        <button class="pbtn sm" data-act="buy" data-item="${k}" ${me.gold < price || (k === 'oil' && mine.flasks >= mine.flaskCap) || (k === 'potion' && mine.potions >= c.POTION_CAP) ? 'disabled' : ''}>Buy</button>
+        <button class="pbtn sm" data-act="buy" data-item="${k}" ${me.gold < price || (k === 'potion' && mine.potions >= c.POTION_CAP) ? 'disabled' : ''}>Buy</button>
         <span class="muted small">You have ${owned}</span>
         ${k === 'potion' && mine.potions > 0 ? `<button class="pbtn sm" data-act="drink" ${me.hp >= c.START_HP ? 'disabled' : ''}>Drink</button>` : ''}
       </div>
@@ -722,20 +738,34 @@ function renderHud() {
       btns.push(`<button class="pbtn" data-act="chooseDoor" data-i="${n.i}">Choose Door ${ROMAN[n.i]}</button>`);
     } else {
       let label = role === 'ghost' ? 'Float up to someone' : 'Walk up to something';
-      if (n) label = n.type === 'shop' ? 'Shop' : n.type === 'fire' ? 'Rest by the fire' : n.type === 'door' ? `Door ${ROMAN[n.i]}` : `Whisper to ${esc(pname(n.id))}`;
+      if (n) label = n.type === 'shop' ? 'Shop' : n.type === 'statue' ? 'Ask the statue' : n.type === 'fire' ? 'Rest by the fire' : n.type === 'door' ? `Door ${ROMAN[n.i]}` : `Whisper to ${esc(pname(n.id))}`;
       btns.push(`<button class="pbtn gold act-btn" data-act="roomAct" ${n && n.type !== 'door' ? '' : 'disabled'}>${label}</button>`);
     }
     if (role === 'adv' && d.mine && S.phase === 'adv' && d.mine.followed) {
       btns.push(`<span class="follow-chip ${d.mine.followed}">${d.mine.followed === 'on' ? 'Someone is following you' : 'They stopped following you'}</span>`);
     }
     if (role === 'adv' && d.mine) {
-      btns.push(`<span class="oil-chip" title="Oil for your lantern: one flask per scan">${Sprites.icon('flask', 2)} ${d.mine.flasks}/${d.mine.flaskCap}</span>`);
-      if (S.phase === 'adv' && d.mine.inv.lens > 0) btns.push(`<button class="pbtn ${ui.useLens ? 'on' : ''}" data-act="lensToggle" aria-pressed="${!!ui.useLens}">${Sprites.icon('eye', 2)} Lens ${ui.useLens ? 'on' : 'off'}</button>`);
+      btns.push(`<span class="oil-chip" title="Oil for your lantern this round: one flask per scan">${Sprites.icon('flask', 2)} ${d.mine.flasks}/${d.mine.flasksPerRound}</span>`);
+      if (S.phase === 'adv' && d.mine.inv.lens > 0) btns.push(d.mine.lensUsed
+        ? `<button class="pbtn" disabled title="A Lens works once a round">${Sprites.icon('eye', 2)} Lens used</button>`
+        : `<button class="pbtn ${ui.useLens ? 'on' : ''}" data-act="lensToggle" aria-pressed="${!!ui.useLens}">${Sprites.icon('eye', 2)} Lens ${ui.useLens ? 'on' : 'off'}</button>`);
+    }
+  }
+  let pendingQ = 0;
+  if (role === 'dm' && S.phase === 'adv' && d.dm && d.dm.statue) {
+    const st = d.dm.statue;
+    for (const a of st.asks.filter((x) => !x.delivered)) {
+      pendingQ++;
+      const q = `Door ${ROMAN[a.door]} trapped${a.element ? ` with ${cap(a.element)}` : ''}?`;
+      btns.push(`<div class="statue-q">${Sprites.icon('statue', 2)}<span><b>${esc(pname(a.from))}</b> asks: ${q} <span class="muted">Truth: ${a.truth ? 'Yes' : 'No'}</span></span>
+        ${a.choice ? `<b class="${a.choice === 'lie' ? 'spite-text' : ''}">${a.choice === 'lie' ? `Lying: “${a.truth ? 'No' : 'Yes'}”` : `Truth: “${a.truth ? 'Yes' : 'No'}”`}</b>`
+          : `<button class="pbtn sm" data-act="statueTruth" data-id="${a.id}">Truth</button><button class="pbtn sm" data-act="statueLie" data-id="${a.id}" ${st.liesLeft > 0 ? '' : 'disabled'}>Lie (${st.liesLeft} left)</button>`}
+        <i class="statue-wait" style="animation-duration:${a.left}ms"></i></div>`);
     }
   }
   const touch = window.matchMedia('(pointer: coarse)').matches;
   let hint;
-  if (role === 'dm') hint = S.phase === 'dm' ? 'Tap a door to select it, then use the Traps screen on the right.' : 'You’re watching the room. Your traps show on the floor.';
+  if (role === 'dm') hint = S.phase === 'dm' ? 'Tap a door to select it, then use the Traps screen on the right.' : pendingQ ? 'Answer through the statue: if you don’t tap in time, it tells the truth.' : 'You’re watching the room. Your traps show on the floor.';
   else hint = touch ? 'Tap where to go. Tap someone to walk up to them.' : 'Arrow keys or WASD to walk, E to use, or click where to go.';
   return `${btns.length ? `<div class="hud">${btns.join('')}</div>` : ''}<p class="hud-hint">${hint}</p>`;
 }
@@ -753,6 +783,7 @@ const TABS = {
   story: { label: 'This round', icon: () => Sprites.icon('eye', 3) },
   scores: { label: 'Scores', icon: () => Sprites.icon('crown', 3) },
   bribe: { label: 'Bribe', icon: () => Sprites.icon('bribe', 3) },
+  statue: { label: 'Statue', icon: () => Sprites.icon('statue', 3) },
   offers: { label: 'Offers', icon: () => Sprites.icon('letter', 3) },
 };
 function tabsFor() {
@@ -765,7 +796,8 @@ function tabsFor() {
   if (role === 'dm') return ['traps'].concat(['dm', 'adv'].includes(ph) ? ['bribe'] : [], ['talk', 'history', 'menu']);
   if (role === 'ghost') return (ph === 'adv' ? ['haunt'] : []).concat(['talk', 'history', 'menu']);
   const offers = ph === 'adv' && d.mine && d.mine.offers && d.mine.offers.length ? ['offers'] : [];
-  return (ph === 'setup' ? ['gear'] : []).concat(['journal'], offers, ['shop', 'talk', 'history', 'menu']);
+  const statue = ph === 'adv' && role === 'adv' ? ['statue'] : [];
+  return (ph === 'setup' ? ['gear'] : []).concat(['journal'], offers, statue, ['shop', 'talk', 'history', 'menu']);
 }
 function defaultTab() {
   const d = D();
@@ -810,6 +842,7 @@ function renderTab() {
   else if (t === 'story') body = renderStory();
   else if (t === 'bribe') body = renderBribe();
   else if (t === 'offers') body = renderOffers();
+  else if (t === 'statue') body = renderStatue();
   else if (t === 'scores') body = S.phase === 'matchEnd' ? renderMatchEnd() + `<div class="win"><div class="win-title">Score by dungeon</div>${renderHistory()}</div>` : renderScoresTab();
   return `<div class="panel-inner"><h3 class="panel-head">${TABS[t] ? TABS[t].label : ''}</h3>${body}</div>`;
 }
@@ -843,7 +876,12 @@ function renderStory() {
   const last = d.round >= d.rounds || d.advs.every((a) => !a.alive || a.left);
   return `<div class="row" style="margin-bottom:10px">${playing ? '<button class="pbtn" data-act="skip">Skip</button>' : '<button class="pbtn" data-act="replay">Replay</button>'}</div>
     ${playing ? '' : readyBox(last ? 'Scores' : 'Next round')}
-    ${playing || !r ? '<p class="muted">The doors are opening…</p>' : storyHtml(r)}`;
+    ${playing || !r ? '<p class="muted">The doors are opening…</p>' : statueRecap() + storyHtml(r)}`;
+}
+// only the asker sees this: did the statue lie to them?
+function statueRecap() {
+  const rec = (D().mine && D().mine.statueRecap) || [];
+  return rec.map((q) => `<div class="note statue-recap ${q.lied ? 'warn' : ''}">${Sprites.icon('statue', 2)} Only you see this: you asked if Door ${ROMAN[q.door]} was trapped${q.element ? ` with ${cap(q.element)}` : ''}. ${q.answer === null ? 'The doors opened before it answered.' : q.lied ? `It said ${q.answer ? 'Yes' : 'No'}, and <b>that was a lie</b>.` : `It said ${q.answer ? 'Yes' : 'No'}, and that was the truth.`}</div>`).join('');
 }
 function renderHistoryTab() {
   const d = D();
@@ -1015,6 +1053,26 @@ function renderBribe() {
     <div class="ws-label">This round’s offers</div>
     ${list}
   </div>`;
+}
+/* ----- the DM's statue: one question a round ----- */
+function renderStatue() {
+  const d = D();
+  const mine = d.mine;
+  const asked = mine.statue || [];
+  const near = ui.near && ui.near.type === 'statue';
+  const q = ui.statueQ || (ui.statueQ = { door: 0, element: '' });
+  const intro = `<p class="small" style="margin-top:0">The DM answers through the statue: one question a round. They choose truth or a lie, but only have a few lies each round, so most answers are true. Maybe not the ones that matter most.</p>`;
+  const history = asked.map((a) => `<div class="note statue-ans">You asked: is Door ${ROMAN[a.door]} trapped${a.element ? ` with ${cap(a.element)}` : ''}?<br>${a.delivered ? `The statue says <b>${a.answer ? 'Yes' : 'No'}</b>.` : `The statue’s eyes flicker… <i class="statue-wait" style="animation-duration:${a.left}ms"></i>`}</div>`).join('');
+  if (!mine.canAsk) return `${intro}${history}<p class="muted small">At the reveal you’ll learn, privately, whether it lied to you.</p>`;
+  if (!near) return `${intro}<p>Walk up to the statue in the corner to ask it.</p><button class="pbtn gold" data-act="sheet" data-v="statue">Walk to the statue</button>`;
+  const doors = Array.from({ length: d.doorsCount }, (_, i) => `<button class="pbtn sm ${q.door === i ? 'on' : ''}" data-act="statueDoor" data-i="${i}">Door ${ROMAN[i]}</button>`).join('');
+  const kinds = [['', 'Trapped at all?']].concat(EL.map((e) => [e, `With ${cap(e)}?`]))
+    .map(([e, l]) => `<button class="pbtn sm ${q.element === e ? 'on' : ''}" data-act="statueEl" data-v="${e}">${e ? Sprites.icon(e, 2) : ''}${l}</button>`).join('');
+  return `${intro}
+    <div class="ws-label">Which door</div><div class="seg">${doors}</div>
+    <div class="ws-label">Ask</div><div class="seg statue-kinds">${kinds}</div>
+    <button class="pbtn gold lockin" data-act="statueAsk">Ask: is Door ${ROMAN[q.door]} trapped${q.element ? ` with ${cap(q.element)}` : ''}?</button>
+    <p class="muted small" style="margin:6px 0 0">The answer comes in a few seconds. Only you see it.</p>`;
 }
 function renderOffers() {
   const d = D();
@@ -1230,12 +1288,14 @@ function renderBook() {
     const chosen = a.door === i && !a.resting;
     const clue = k
       ? `${Sprites.icon(k.clue, 2)} Clue: <b class="el-${k.clue}">${SHORT[k.clue]}</b>${k.clue !== 'none' ? ` (${cap(k.clue)})` : ''}${elementTag(k.clue, mine.affinity)}`
-      : `Not scanned yet. ${mine.flasks > 0 ? 'Walk up to it and scan it.' : 'Your lantern is out of oil.'}`;
+      : `Not scanned yet. ${mine.flasks > 0 ? 'Walk up to it and scan it.' : 'Your lantern is out of oil this round: you could ask the statue about it.'}`;
+    // what the statue said about this door (it may have lied)
+    const said = (mine.statue || []).filter((q) => q.door === i).map((q) => `<p class="j-statue">${Sprites.icon('statue', 2)} You asked the statue: trapped${q.element ? ` with ${cap(q.element)}` : ''}? ${q.delivered ? `It said <b>${q.answer ? 'Yes' : 'No'}</b>. <span class="muted">(It may lie.)</span>` : '<span class="muted">Waiting for its answer…</span>'}</p>`).join('');
     const lens = k && k.lens ? `<p>${Sprites.icon('eye', 2)} Lens: <b>${k.lens.trap ? `${c.TRAPS[k.lens.trap.tier].name} ${cap(k.lens.trap.element)} trap` : 'no trap'}</b>${k.lens.illusion ? ' <span class="ttag spite">the clue is fake</span>' : ''}</p>` : '';
     const rumours = ui.whispers.filter((w) => w.from !== S.me && doorIn(w.text) === i).slice(0, 3).map((w) => `<p class="j-rumour">${esc(pname(w.from))}: “${esc(w.text)}”</p>`).join('');
     const mk = Object.entries(MARK_NAMES).map(([m, label]) => `<button class="mark-btn m-${m} ${marks[i] === m ? 'on' : ''}" data-act="mark" data-i="${i}" data-v="${m}" aria-pressed="${marks[i] === m}">${label}</button>`).join('');
     body = `<h4 class="book-title">Door ${ROMAN[i]} <span class="gold">${Sprites.icon('coin', 2)} ${x.gold}</span></h4>
-      <p>${clue}</p>${lens}
+      <p>${clue}</p>${lens}${said}
       ${rumours ? `<div class="rumours"><span class="muted small">Rumours</span>${rumours}</div>` : ''}
       <div class="j-actions">${mk}</div>
       <button class="pbtn ${chosen ? 'on' : 'gold'} choose-btn" data-act="pickDoor" data-i="${i}">${chosen ? `Door ${ROMAN[i]} is your choice` : `Choose Door ${ROMAN[i]}`}</button>`;
@@ -1245,7 +1305,7 @@ function renderBook() {
     <div class="ov-strip">${strip}</div>
     <div class="ribbons">${ribbons}</div>
     <div class="book-page">${nudge}${body}</div>
-    <p class="small muted book-oil">${Sprites.icon('flask', 2)} Oil ${mine.flasks}/${mine.flaskCap}</p>
+    <p class="small muted book-oil">${Sprites.icon('flask', 2)} Oil ${mine.flasks}/${mine.flasksPerRound} this round</p>
   </div>`;
 }
 
@@ -1261,7 +1321,7 @@ function renderJournal() {
   const scannedAny = Object.keys(mine.known || {}).length > 0;
   const nudge = !scannedAny && mine.flasks > 0
     ? `<div class="note" style="margin-top:0">You haven’t scanned a door yet. Walk up to one and ${touch ? 'tap' : 'press E for'} <b>Scan</b>. It uses one oil flask, and only you see what it shows.</div>` : '';
-  const oil = `<p class="small" style="margin:0 0 10px">${Sprites.icon('flask', 2)} Oil: <b>${mine.flasks}</b> of ${mine.flaskCap}. Each scan uses one flask, and you get ${mine.flasksPerRound} more each round.${mine.inv.lens ? ` You have ${mine.inv.lens === 1 ? 'a Lens' : mine.inv.lens + ' Lenses'}: turn it on before a scan to see the real trap.` : ''}</p>`;
+  const oil = `<p class="small" style="margin:0 0 10px">${Sprites.icon('flask', 2)} Oil: <b>${mine.flasks}</b> of ${mine.flasksPerRound} this round. Each scan uses one flask (a Lens scan too), and unused oil doesn’t carry over. For the door you can’t scan, ask the statue.</p>`;
   const pages = d.doors.map((x, i) => {
     const k = mine.known[i];
     const chosen = a.door === i && !a.resting;
@@ -1378,7 +1438,8 @@ function renderRules() {
     <h3>Each round</h3>
     <ul>
       <li>Adventurers see each door’s gold. Its clue is hidden: walk up to a door and scan it with your lantern (one oil flask, 3 seconds, and only you see the result). A trapped door’s clue is its real element; an empty door is silent. A fake clue fakes either, and fools scans too.</li>
-      <li>You get oil each round (one fewer flask than there are doors) and can carry as many flasks as there are doors. The shopkeeper sells more. A Lens makes your next scan show the real trap and its strength.</li>
+      <li>You get fresh oil each round, one flask fewer than there are doors, and unused oil doesn’t carry over, so there’s always a door you can’t scan. A Lens makes a scan show the real trap and its strength, even through a fake clue. It still takes a flask, and works once a round.</li>
+      <li>The DM’s statue stands in the corner. Each round you can walk up and ask it one question: is Door X trapped, or trapped with a given element? The DM answers through it, truthfully or with a lie, but only has a few lies a round (1, or 2 with five or more adventurers). The answer arrives a few seconds later whatever the DM does, and is the truth if the DM doesn’t answer in time. Only you see it, and at the reveal you learn whether it lied to you.</li>
       <li>Each adventurer secretly picks a door and how to go in, follows someone, or rests by the fire (+${c.REST_HEAL} HP). If time runs out, the plan you’ve picked counts even if you didn’t lock it in. Then the doors open one at a time, and after a short pause the next round starts on its own. History keeps every round’s story.</li>
       <li>While the shop is open, you see other players’ gold and HP as they were when the DM started setting traps, so nobody can spot what you bought or drank. Real values show when the doors open.</li>
     </ul>
@@ -1404,10 +1465,10 @@ function renderRules() {
     <h3>Elements</h3>
     <p>Your element halves damage from that element and adds 50% from the one that beats it. Water beats Fire, Fire beats Air, Air beats Earth, Earth beats Water. Doors show a Weak or Resist badge for you, so you don’t need to remember this.</p>
     <h3>Items</h3>
-    <p class="small muted" style="margin-top:0">Single use, and they last the whole dungeon. The shop is open while the DM sets traps and while you choose. First-round prices: Shove ${price('shove')}, Oil ${price('oil')}, Charm ${price('charm')}, Potion ${price('potion')}, Lens ${price('lens')}, Armour ${price('armour')}, Lock ${price('lock')}. Inflation: prices rise every round, to ${Math.round(c.INFLATION * 100)}% more by the last round, so buying early is cheaper.</p>
+    <p class="small muted" style="margin-top:0">Single use, and they last the whole dungeon. The shop is open while the DM sets traps and while you choose. First-round prices: Shove ${price('shove')}, Charm ${price('charm')}, Potion ${price('potion')}, Lens ${price('lens')}, Armour ${price('armour')}, Lock ${price('lock')}. Inflation: prices rise every round, to ${Math.round(c.INFLATION * 100)}% more by the last round, so buying early is cheaper.</p>
     <ul>
       <li>Potion: +40 HP; you can carry ${c.POTION_CAP} at most. Armour: half damage this round. Charm: resist one element this round.</li>
-      <li>Oil flask: one more scan. Lens: your next scan shows the real trap, even through a fake clue.</li>
+      <li>Lens: a scan with it shows the real trap, even through a fake clue. It needs a flask like any scan, and works once a round.</li>
       <li>Lock: you enter alone and take all the gold; anyone else on that door is locked out. You take ×${c.LOCK_MULT} damage.</li>
       <li>Shove: if your target picks your door, they spring the trap alone at ×1.5, and you pickpocket ${Math.round(c.PICKPOCKET * 100)}% of their gold after the loot. Two shoves on each other: both go in. A Lock on that door beats a Shove.</li>
     </ul>
@@ -1491,6 +1552,8 @@ function formatLog(log) {
     const unspent = lastRound ? (lastRound.purseEnd !== undefined ? lastRound.purseEnd : lastRound.purseLeft) : 0;
     L(`  DM purse: received ${purseTotal}; built ${purseSpent} into traps and fake clues (${hiddenTotal} of it hidden gold behind doors); paid ${bribesPaid.reduce((s, b) => s + b.amount, 0)} in bribes; ${unspent} unspent at the end (worth nothing)`);
     L(`  Bribes: ${allBribes.length} offered, ${allBribes.filter((b) => b.answer === 'accepted').length} accepted, ${allBribes.filter((b) => b.answer === 'declined').length} declined, ${bribesPaid.length} paid`);
+    const asks = dg.rounds.flatMap((r) => r.statue || []);
+    L(`  Statue: ${asks.length} questions, ${asks.filter((q) => q.lie).length} lies, ${asks.filter((q) => /no answer/.test(q.told)).length} cut off by the doors opening`);
     L(`  Following: ${follows.length} follow plans; ${follows.filter((c) => c.door).length} went through a door, ${follows.filter((c) => !c.door).length} rested`);
     L(`  Pickpockets: ${pockets.length ? pockets.map((x) => `${x.shover} took ${x.stolen} from ${x.target}`).join(', ') : 'none'}`);
     for (const r of dg.rounds) {
@@ -1503,6 +1566,10 @@ function formatLog(log) {
       if (r.choices) {
         L('  Choices:');
         r.choices.forEach((c) => L(`    ${c.player}: ${c.choice}${c.door ? ` into door ${c.door}` : ''}${c.following ? ` (following ${c.following}${c.why ? `: ${c.why}` : ''})` : ''}${c.items && c.items.length ? ` [${c.items.join(', ')}]` : ''}`));
+        if (r.statue && r.statue.length) {
+          L(`  The statue (${r.statueLies ? `${r.statueLies.used} of ${r.statueLies.max} lies used` : ''}):`);
+          r.statue.forEach((q) => L(`    ${q.asker} asked: ${q.question} Told ${q.told}; truth ${q.truth}${q.lie ? '  <- a lie' : ''} (DM: ${q.dm})`));
+        }
         if (r.bribes && r.bribes.length) {
           L('  Bribes:');
           r.bribes.forEach((b) => L(`    ${b.amount} gold to ${b.to} for door ${b.door}${b.company ? ' (only with company)' : ''}, offered ${b.offered}; ${b.answer}; ${b.outcome}`));
@@ -1654,6 +1721,14 @@ document.addEventListener('click', (e) => {
       ui.adv.door = i; ui.adv.resting = false; ui.page = 'plan'; sendPlanDraft(); render(); break;
     case 'follow': followNow(t.dataset.id); break;
     case 'unfollow': leaveFollowing(() => render()); break;
+    case 'statueDoor': ui.statueQ.door = i; render(); break;
+    case 'statueEl': ui.statueQ.element = v || ''; render(); break;
+    case 'statueAsk':
+      socket.emit('statueAsk', { door: ui.statueQ.door, element: ui.statueQ.element || null }, (r) => { ack(r); if (r && r.ok) Sound.play('click'); });
+      break;
+    case 'statueTruth': case 'statueLie':
+      socket.emit('statueAnswer', { id: t.dataset.id, lie: act === 'statueLie' }, (r) => { ack(r); if (r && r.ok) Sound.play(act === 'statueLie' ? 'shove' : 'click'); });
+      break;
     case 'bribeTo': ui.bribe.to = t.dataset.id; render(); break;
     case 'bribeDoor': ui.bribe.door = i; render(); break;
     case 'bribeAmt': ui.bribe.amount = Math.max(cfg().BRIBE_MIN, Math.min(bribeRoom(), ui.bribe.amount + Number(v))); render(); break;
@@ -1674,8 +1749,13 @@ document.addEventListener('click', (e) => {
     case 'sheet':
       if (v === 'shop' && !(ui.near && ui.near.type === 'shop')) {
         // the shop is a place: walk there
-        Room.walkTo({ x: (64 - 26) / 332, y: (346 - 118) / 248 });
+        Room.walkTo(Room.shopSpot());
         toast('Walking to the shopkeeper…', 'info');
+        break;
+      }
+      if (v === 'statue' && !(ui.near && ui.near.type === 'statue')) {
+        Room.walkTo(Room.statueSpot());
+        toast('Walking to the statue…', 'info');
         break;
       }
       ui.sheet = v; render(); Sound.play('click'); break;

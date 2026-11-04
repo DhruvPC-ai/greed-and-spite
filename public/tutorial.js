@@ -57,7 +57,7 @@ const Tutorial = (() => {
     {
       key: 'scan',
       title: 'Scan with your lantern',
-      text: 'Walk up to a door and scan it. It takes 3 seconds and one oil flask, and only you see the result. Everyone sees which door you lit up. A Lens shows the real trap, even through a fake clue.',
+      text: 'Walk up to a door and scan it: 3 seconds and one flask, and only you see the result. Your oil runs out one door short, so ask the DM’s statue about the last one. It may lie, though only a few times a round.',
       art: () => `
         <div class="trow end">
           <div class="tscan">
@@ -66,7 +66,7 @@ const Tutorial = (() => {
             <div class="tscan-rune">${I('fire', 5)}<b>Fire</b></div>
             <div class="tscan-lantern">${Sprites.lantern(3)}</div>
           </div>
-          <div class="tcol tight">${tag(`${I('flask', 2)} New oil every round`)}${tag('Only you see the result')}${tag(`${I('eye', 2)} Lens: see through lies`, 'gold')}${tag('Whisper what you saw, or lie', 'spite')}</div>
+          <div class="tcol tight">${tag(`${I('flask', 2)} Oil for all doors but one`)}${tag(`${I('statue', 2)} Ask the statue: one question`)}${tag(`${I('eye', 2)} Lens: see through lies`, 'gold')}${tag('Whisper what you saw, or lie', 'spite')}</div>
         </div>`,
     },
     {
@@ -125,7 +125,7 @@ const Tutorial = (() => {
         <div class="trow end">
           <div class="tcol tight"><div class="tfire">${Sprites.flame(4)}<div class="tlogs"></div></div><span class="tt-sit">${Sprites.sitting(2, 'air', 3)}</span><span class="tfloat heal">+10 HP</span></div>
           <div class="titems">
-            ${[['potion', 'Potion', 12, 'Heal 40'], ['flask', 'Oil', 7, 'One more scan'], ['shield', 'Armour', 14, 'Half damage'], ['eye', 'Lens', 12, 'Scan sees the truth'], ['lock', 'Lock', 15, 'Take all, lock others out'], ['push', 'Shove', 5, 'Push someone in first']].map(([ic, n, price, d]) => `
+            ${[['potion', 'Potion', 12, 'Heal 40'], ['shield', 'Armour', 14, 'Half damage'], ['eye', 'Lens', 12, 'Scan sees the truth'], ['lock', 'Lock', 15, 'Take all, lock others out'], ['push', 'Shove', 5, 'Push someone in first']].map(([ic, n, price, d]) => `
               <div class="titem">${I(ic, 3)}<b>${n} <em class="tprice">${price}</em></b><span>${d}</span></div>`).join('')}
           </div>
         </div>`,
@@ -170,7 +170,7 @@ const Tutorial = (() => {
     {
       key: 'dm',
       title: 'When you’re the DM',
-      text: 'Drag the gold bar to place the bait. Your secret purse pays for traps and fake clues, and every trap is gold hidden behind its door. You can also secretly bribe an adventurer to pick a door; you score the treasure they don’t gain.',
+      text: 'Drag the gold bar to place the bait. Your secret purse pays for traps and fake clues, and every trap is gold hidden behind its door. While they choose, you answer their questions through your statue, lying a few times a round, and can secretly bribe them.',
       art: () => `
         <div class="tcol tight" style="width:100%;max-width:340px">
           <div class="tpurse">${I('bag', 3)}<b>Purse: 24 gold</b><span>only you see it</span></div>
