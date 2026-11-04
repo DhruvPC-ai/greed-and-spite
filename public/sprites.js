@@ -197,6 +197,10 @@ const Sprites = (() => {
     gear: [['...GG...', '.G.GG.G.', '..GGGG..', 'GGG..GGG', 'GGG..GGG', '..GGGG..', '.G.GG.G.', '...GG...'], { G: '#a8b0c4' }],
     spikes: [['..W...W.', '..W...W.', '.WGW.WGW', '.WGW.WGW', 'WGGGWGGG', 'WGGGWGGG', 'KKKKKKKK', 'KKKKKKKK'], { W: '#e3e8f2', G: '#9aa3b5', K: '#4a3418' }],
     erase: [['R......R', '.R....R.', '..R..R..', '...RR...', '...RR...', '..R..R..', '.R....R.', 'R......R'], { R: '#e0524a' }],
+    // a coin held out on an open palm: the DM's Bribe screen
+    bribe: [['...GGG..', '..GYWYG.', '..GYYYG.', '...GGG..', 'S......S', 'SS....SS', 'SSSSSSSS', '.SSSSSS.'], { G: '#a8761c', Y: '#f5c542', W: '#fff4c2', S: '#e0b088' }],
+    // a sealed letter: an adventurer's secret Offers
+    letter: [['........', 'PPPPPPPP', 'PKPPPPKP', 'PPKPPKPP', 'PPPRRPPP', 'PPPRRPPP', 'PPPPPPPP', '........'], { P: '#e9d7a8', K: '#7a6a4a', R: '#e0524a' }],
     zz: [['ZZZZ....', '..Z.....', '.Z......', 'ZZZZ.ZZZ', '......Z.', '.....ZZZ', '........', '........'], { Z: '#c3b6ff' }],
   };
   function icon(name, scale = 3) {

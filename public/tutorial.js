@@ -120,7 +120,7 @@ const Tutorial = (() => {
     {
       key: 'shop',
       title: 'While you wait',
-      text: 'Walk around with the arrow keys, or tap where to go. Walk up to the shopkeeper to shop, and up to anyone to whisper. Spent gold counts for the DM, and in a Shortage one item costs double for the round.',
+      text: 'Walk around with the arrow keys, or tap where to go. Walk up to the shopkeeper to shop, and up to anyone to whisper. Spent gold counts for the DM, and prices go up every round, so buying early is cheaper.',
       art: () => `
         <div class="trow end">
           <div class="tcol tight"><div class="tfire">${Sprites.flame(4)}<div class="tlogs"></div></div><span class="tt-sit">${Sprites.sitting(2, 'air', 3)}</span><span class="tfloat heal">+10 HP</span></div>
@@ -170,7 +170,7 @@ const Tutorial = (() => {
     {
       key: 'dm',
       title: 'When you’re the DM',
-      text: 'Drag the gold bar to place the bait. Your secret purse pays for traps, fake clues and Shortages, and every trap is gold hidden behind its door. You can also secretly bribe an adventurer to pick a door; you score the treasure they don’t gain.',
+      text: 'Drag the gold bar to place the bait. Your secret purse pays for traps and fake clues, and every trap is gold hidden behind its door. You can also secretly bribe an adventurer to pick a door; you score the treasure they don’t gain.',
       art: () => `
         <div class="tcol tight" style="width:100%;max-width:340px">
           <div class="tpurse">${I('bag', 3)}<b>Purse: 24 gold</b><span>only you see it</span></div>

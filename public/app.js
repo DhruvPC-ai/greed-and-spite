@@ -45,9 +45,11 @@ const colorOf = (id) => {
   return Math.max(0, S.players.findIndex((p) => p.id === id));
 };
 
-function toast(msg) {
+// kind 'error' (red, the default: refusals and failures) or 'info' (neutral: news and confirmations)
+function toast(msg, kind = 'error') {
   const t = document.getElementById('toast');
   t.textContent = msg;
+  t.classList.toggle('info', kind === 'info');
   t.classList.add('show');
   clearTimeout(toast.h);
   toast.h = setTimeout(() => t.classList.remove('show'), 3200);
@@ -80,7 +82,6 @@ socket.on('state', (v) => {
     ui.readyAt = S.phase === 'dungeonEnd' ? Date.now() + SCORES_MS : null;
     ui.revealGuard = S.phase === 'results' ? Date.now() + 30000 : 0;
     if (S.phase !== 'adv') { ScanView.close(); Room.setMyScan(false); }
-    if (S.phase === 'adv' && D() && D().shortage) setTimeout(announceShortage, 600);
   }
   const need = needsMe() ? `${S.phase}:${S.match.dIndex}:${D().round}` : null;
   if (need && need !== lastNeed) Sound.play('yourTurn');
@@ -127,7 +128,7 @@ socket.on('whisper', ({ from, text }) => {
   ui.whispers.unshift({ from, to: S.me, text });
   Sound.play('whisper');
   if (ui.sheet === 'whisper') renderSheetOnly();
-  else toast(`${pname(from)} whispered to you. Open Say to read it.`);
+  else toast(`${pname(from)} whispered to you. Open Say to read it.`, 'info');
 });
 socket.on('huddle', ({ a, b }) => {
   if (a === S.me || b === S.me) return;
@@ -212,7 +213,7 @@ function restNow() {
   ui.adv.resting = true;
   socket.emit('action', { type: 'rest' }, (r) => {
     ack(r);
-    if (r && r.ok) { Sound.play('lockIn'); toast('You’ll rest by the fire this round. You can change your mind until time runs out.'); }
+    if (r && r.ok) { Sound.play('lockIn'); toast('You’ll rest by the fire this round. You can change your mind until time runs out.', 'info'); }
   });
   render();
 }
@@ -256,15 +257,6 @@ function leaveFollowing(cb) {
   socket.emit('unfollow', null, (r) => { if (r && r.error) toast(r.error); });
   if (cb) cb();
 }
-const SCARCE = { potion: 'Potions are', oil: 'Lamp oil is', armour: 'Armour is', charm: 'Charms are', lens: 'Lenses are', lock: 'Locks are', shove: 'Shoves are' };
-const shortageLine = (sh) => `${SCARCE[sh.item] || cap(sh.item) + ' is'} scarce today! ${sh.price} gold.`;
-// when the doors open, the shopkeeper calls out the DM's Shortage (the new price is public)
-function announceShortage() {
-  const d = D();
-  if (!d || !d.shortage || S.phase !== 'adv') return;
-  ui.merchantNext = Date.now() + 9000;
-  if (viewMode() === 'room') Room.say('merchant', shortageLine(d.shortage)); else Scene.say('merchant', shortageLine(d.shortage));
-}
 function merchantTalk() {
   const lines = (S && cfg().MESSAGES.merchant) || [];
   if (!lines.length) return;
@@ -304,7 +296,7 @@ function toggleFullscreen() {
 }
 document.addEventListener('fullscreenchange', () => { if (ui.sheet === 'menu') renderSheetOnly(); setTimeout(() => Room.fit(), 100); });
 
-socket.on('kicked', () => { store.del('gs_code'); S = null; render(); toast('The host removed you from the game.'); });
+socket.on('kicked', () => { store.del('gs_code'); S = null; render(); toast('The host removed you from the game.', 'info'); });
 socket.on('disconnect', () => toast('Connection lost. Reconnecting…'));
 
 function openTutorial(start) {
@@ -334,7 +326,6 @@ function syncLocal() {
     ui.dmKey = key;
     ui.dm = Array.from({ length: d.doorsCount }, () => ({ gold: 0, tier: 'none', element: 'fire', illusion: 'honest' }));
     ui.dmSel = 0;
-    ui.dmShortage = '';
     ui.bribe = { to: '', door: 0, amount: cfg().BRIBE_MIN, company: false };
     evenGold();
     sendDraft();
@@ -359,7 +350,7 @@ function syncFollowAndOffers() {
     const key = `${S.match.dIndex}-${d.round}-${o.id}`;
     if (ui.offersSeen.has(key)) continue;
     ui.offersSeen.add(key);
-    if (!o.answer) { toast('The DM sent you a secret offer. Open Offers.'); Sound.play('coins', 2); }
+    if (!o.answer) { toast('The DM sent you a secret offer. Open Offers.', 'info'); Sound.play('coins', 2); }
   }
 }
 function draftForServer() {
@@ -369,14 +360,13 @@ function draftForServer() {
       trap: x.tier === 'none' ? null : { tier: x.tier, element: x.element },
       illusion: x.illusion === 'honest' ? null : x.illusion,
     })),
-    shortage: ui.dmShortage || null,
   };
 }
 function sendDraft() { socket.emit('dmDraft', draftForServer()); }
 const goldLeft = () => D().budget - ui.dm.reduce((s, x) => s + x.gold, 0);
-// everything the DM's build costs from the purse: traps, fake clues and a Shortage
+// everything the DM's build costs from the purse: traps and fake clues
 function dmCost() {
-  return ui.dm.reduce((s, x) => s + trapCost(x), 0) + (ui.dmShortage ? cfg().SHORTAGE_COST : 0);
+  return ui.dm.reduce((s, x) => s + trapCost(x), 0);
 }
 
 /* ---------- timer ---------- */
@@ -675,7 +665,7 @@ function renderSetup() {
   if (d.role === 'dm') {
     return `<div class="win">
       <p>This dungeon has <b>${d.rounds}</b> rounds and <b>${d.doorsCount}</b> doors per round. The treasure is <span class="gold">${d.T} gold</span>: all the bait you’ll put on the doors.</p>
-      <p class="muted" style="margin:0">You score the treasure the adventurers don’t gain, and whatever they spend in the shop. Each round you get bait to place on the doors, and a secret trap purse for traps, fake clues and Shortages. Unspent purse carries over, but it isn’t score.</p>
+      <p class="muted" style="margin:0">You score the treasure the adventurers don’t gain, and whatever they spend in the shop. Each round you get bait to place on the doors, and a secret trap purse for traps, fake clues and bribes. Unspent purse carries over, but it isn’t score.</p>
     </div>`;
   }
   const mine = d.mine;
@@ -699,22 +689,22 @@ function renderShop() {
   const c = cfg();
   const mine = d.mine;
   const me = advOf(S.me);
-  const sh = d.shortage;
   const items = Object.entries(c.SHOP).map(([k, it]) => {
-    const owned = k === 'potion' ? mine.potions : k === 'oil' ? `${mine.flasks} of ${mine.flaskCap}` : mine.inv[k];
-    const scarce = sh && sh.item === k;
-    const price = scarce ? sh.price : it.cost;
-    return `<div class="item ${scarce ? 'scarce' : ''}" data-item="${k}">
-      <div class="top"><span>${it.name}${scarce ? ' <span class="ttag spite">Shortage</span>' : ''}</span><span class="gold price">${Sprites.icon('coin', 2)} ${scarce ? `<s class="was">${it.cost}</s> ` : ''}<b>${price}</b></span></div>
+    const owned = k === 'potion' ? `${mine.potions} of ${c.POTION_CAP}` : k === 'oil' ? `${mine.flasks} of ${mine.flaskCap}` : mine.inv[k];
+    // prices rise every round; show next round's so buying early can be weighed
+    const price = (d.prices && d.prices[k]) || it.cost;
+    const next = d.nextPrices && d.nextPrices[k] > price ? d.nextPrices[k] : null;
+    return `<div class="item" data-item="${k}">
+      <div class="top"><span>${it.name}</span><span class="gold price">${Sprites.icon('coin', 2)} <b>${price}</b>${next ? `<span class="next-price" title="Next round’s price">→ ${next}</span>` : ''}</span></div>
       <p>${it.text}</p>
       <div class="row">
-        <button class="pbtn sm" data-act="buy" data-item="${k}" ${me.gold < price || (k === 'oil' && mine.flasks >= mine.flaskCap) ? 'disabled' : ''}>Buy</button>
+        <button class="pbtn sm" data-act="buy" data-item="${k}" ${me.gold < price || (k === 'oil' && mine.flasks >= mine.flaskCap) || (k === 'potion' && mine.potions >= c.POTION_CAP) ? 'disabled' : ''}>Buy</button>
         <span class="muted small">You have ${owned}</span>
         ${k === 'potion' && mine.potions > 0 ? `<button class="pbtn sm" data-act="drink" ${me.hp >= c.START_HP ? 'disabled' : ''}>Drink</button>` : ''}
       </div>
     </div>`;
   }).join('');
-  return `<div class="shop-win"><div class="keeper-row"><span class="portrait">${Sprites.merchant(3)}</span><p class="small" style="margin:0">${sh ? `<b class="spite-text">${esc(shortageLine(sh))}</b> ` : ''}You have <span class="gold">${me.gold}</span> gold and ${me.hp} HP. Every item is single use. Gold you spend lowers your gain, so it counts for the DM.</p></div><div class="items">${items}</div></div>`;
+  return `<div class="shop-win"><div class="keeper-row"><span class="portrait">${Sprites.merchant(3)}</span><p class="small" style="margin:0">You have <span class="gold">${me.gold}</span> gold and ${me.hp} HP. Every item is single use and lasts the whole dungeon. Prices go up every round (the arrow shows next round’s). Gold you spend lowers your gain, so it counts for the DM.</p></div><div class="items">${items}</div></div>`;
 }
 
 /* ----- action bar under the room ----- */
@@ -762,8 +752,8 @@ const TABS = {
   traps: { label: 'Traps', icon: () => Sprites.icon('spikes', 3) },
   story: { label: 'This round', icon: () => Sprites.icon('eye', 3) },
   scores: { label: 'Scores', icon: () => Sprites.icon('crown', 3) },
-  bribe: { label: 'Bribe', icon: () => Sprites.icon('coin', 3) },
-  offers: { label: 'Offers', icon: () => Sprites.icon('coin', 3) },
+  bribe: { label: 'Bribe', icon: () => Sprites.icon('bribe', 3) },
+  offers: { label: 'Offers', icon: () => Sprites.icon('letter', 3) },
 };
 function tabsFor() {
   const d = D();
@@ -834,7 +824,6 @@ function readyBox(nextLabel) {
 function storyHtml(r) {
   const lines = [];
   if (r.dmTimedOut) lines.push('<p class="muted">The DM ran out of time, so the dungeon set itself up.</p>');
-  if (r.shortage) lines.push(`<p class="muted">Shortage: ${esc(cfg().SHOP[r.shortage.item].name)} cost ${r.shortage.price} gold instead of ${r.shortage.was}.</p>`);
   r.doors.forEach((x) => lines.push(`<p><span class="dn">${ROMAN[x.index]}</span>${esc(x.lines.join(' '))}</p>`));
   const restText = (x) => {
     if (x.follow && x.why === 'rest') return `followed ${esc(pname(x.follow))} to the campfire and rested`;
@@ -975,9 +964,6 @@ function renderWorkshop() {
     .map(([v, l]) => `<button class="pbtn sm ${x.illusion === v ? 'on' : ''}" data-act="dmFake" data-v="${v}" ${v === 'honest' || x.illusion === v || fakeAfford || x.illusion !== 'honest' ? '' : 'disabled'}>${v !== 'honest' && v !== 'none' ? Sprites.icon(v, 2) : ''}${l}</button>`).join('');
   const weakNote = living.length ? `<p class="small muted" style="margin:6px 0 0">Weak to it: ${EL.map((e) => hurts(e).length ? `<span class="el-${e}">${cap(e)}</span> ${hurts(e).join(', ')}` : '').filter(Boolean).join('; ') || 'nobody yet'}.</p>` : '';
   const hidden = trapCost(x);
-  const shortAfford = cost - (ui.dmShortage ? c.SHORTAGE_COST : 0) + c.SHORTAGE_COST <= purse;
-  const shortBtns = [['', 'None']].concat(Object.entries(c.SHOP).map(([k, it]) => [k, it.name]))
-    .map(([k, l]) => `<button class="pbtn sm ${ui.dmShortage === k ? 'on' : ''}" data-act="dmShortage" data-v="${k}" ${k === '' || ui.dmShortage === k || ui.dmShortage || shortAfford ? '' : 'disabled'}>${l}${k ? ` <span class="muted">${c.SHOP[k].cost}→${c.SHOP[k].cost * c.SHORTAGE_MULT}</span>` : ''}</button>`).join('');
   return `<div class="workshop">
     <div class="purse-row"><span class="purse-ico">${Sprites.icon('bag', 2)}</span><span class="purse-val">Purse: <b>${spare}</b> gold</span>${cost ? `<span class="muted small">${cost} of ${purse} in this build</span>` : ''}</div>
     <p class="purse-note">Only you see your purse. What you build on a door is gold hidden behind it, for whoever survives. ${d.dm.nextIncome ? `+${d.dm.nextIncome} next round; unspent purse carries over but isn’t score.` : 'Last round: unspent purse is worth nothing.'}</p>
@@ -995,8 +981,6 @@ function renderWorkshop() {
     <div class="ws-label">Fake clue <span class="muted">(${coin} ${c.ILLUSION_COST})</span></div>
     <div class="seg fakes">${fakes}</div>
     <div class="row" style="margin-top:10px"><button class="pbtn sm quiet" data-act="dmClear">Clear Door ${ROMAN[sel]}</button></div>
-    <div class="ws-label">Shortage <span class="muted">(${coin} ${c.SHORTAGE_COST}: one item costs ×${c.SHORTAGE_MULT} this round)</span></div>
-    <div class="seg shortages">${shortBtns}</div>
     <button class="pbtn gold lockin" data-act="dmSubmit">Lock in the dungeon</button>
     <p class="small muted" style="margin:6px 0 0">If time runs out, whatever you’ve built is used.</p>
   </div>`;
@@ -1049,10 +1033,9 @@ function renderDmSummary() {
   const c = cfg();
   const waiting = d.advs.filter((a) => !a.ready && !a.left).map((a) => esc(pname(a.id)));
   const rows = (d.dm.doors || []).map((x, i) => `<tr><td><b>${ROMAN[i]}</b></td><td class="gold">${x.gold}${x.hidden ? ` <span class="hidden-gold">+${x.hidden}</span>` : ''}</td><td>${x.trap ? `<span class="el-${x.trap.element}">${c.TRAPS[x.trap.tier].name} ${cap(x.trap.element)}</span>` : 'No trap'}</td><td>${x.illusion !== null ? `<span class="ttag spite">fake: ${SHORT[x.illusion]}</span>` : ''}</td></tr>`).join('');
-  const sh = d.dm.shortage;
   return `<p style="margin-top:0">${waiting.length ? `Still choosing: ${waiting.join(', ')}.` : 'Everyone has chosen.'}</p>
     <table class="scores"><thead><tr><th>Door</th><th>Gold</th><th>Trap</th><th></th></tr></thead><tbody>${rows}</tbody></table>
-    <p class="small muted">Purse left: <b class="gold">${d.dm.purse}</b> gold.${sh ? ` Shortage: ${esc(c.SHOP[sh.item].name)} costs ${sh.price} this round.` : ''}</p>
+    <p class="small muted">Purse left: <b class="gold">${d.dm.purse}</b> gold.</p>
     <p class="small muted">Watch the room: lantern beams show who is scanning which door.</p>`;
 }
 function dmApply(fn) {
@@ -1388,10 +1371,9 @@ function renderRules() {
     <h3>The DM’s gold</h3>
     <ul>
       <li>Bait: each round the DM places that round’s bait on the doors, at least ${c.MIN_DOOR_GOLD} per door in steps of ${c.GOLD_STEP}. Everyone sees it. Bait per door grows from ${c.BAIT_FIRST} in the first round to ${c.BAIT_LAST} in the last. The dungeon’s treasure is all its bait.</li>
-      <li>The trap purse: a working budget only the DM sees, topped up every round. It buys traps (${['minor', 'major', 'deadly'].map((t) => `${c.TRAPS[t].name} ${c.TRAPS[t].dmg} damage for ${c.TRAPS[t].cost} gold`).join(', ')}; every trap has an element), fake clues (${c.ILLUSION_COST}), a Shortage (${c.SHORTAGE_COST}) and bribes. Unspent purse carries over to the next round, but it is worth nothing at the end and isn’t score.</li>
+      <li>The trap purse: a working budget only the DM sees, topped up every round. It buys traps (${['minor', 'major', 'deadly'].map((t) => `${c.TRAPS[t].name} ${c.TRAPS[t].dmg} damage for ${c.TRAPS[t].cost} gold`).join(', ')}; every trap has an element), fake clues (${c.ILLUSION_COST}) and bribes. Unspent purse carries over to the next round, but it is worth nothing at the end and isn’t score.</li>
       <li>Made of gold: what the DM builds on a door is gold hidden behind it. Whoever survives the door takes the bait and the hidden gold, split by bags. The reveal shows each door’s hidden gold.</li>
-      <li>Shortage: while setting traps, the DM can make one shop item cost ×${c.SHORTAGE_MULT} for the round. The shopkeeper announces it when the doors open; prices go back to normal next round.</li>
-      <li>On the Traps screen the DM taps a door in the room, drags the gold bar to share out the bait, taps trap cards to place them, and can add a fake clue or a Shortage.</li>
+      <li>On the Traps screen the DM taps a door in the room, drags the gold bar to share out the bait, taps trap cards to place them, and can add a fake clue.</li>
     </ul>
     <h3>Each round</h3>
     <ul>
@@ -1422,9 +1404,9 @@ function renderRules() {
     <h3>Elements</h3>
     <p>Your element halves damage from that element and adds 50% from the one that beats it. Water beats Fire, Fire beats Air, Air beats Earth, Earth beats Water. Doors show a Weak or Resist badge for you, so you don’t need to remember this.</p>
     <h3>Items</h3>
-    <p class="small muted" style="margin-top:0">Single use. The shop is open while the DM sets traps and while you choose. Shove ${price('shove')}, Oil ${price('oil')}, Charm ${price('charm')}, Potion ${price('potion')}, Lens ${price('lens')}, Armour ${price('armour')}, Lock ${price('lock')}.</p>
+    <p class="small muted" style="margin-top:0">Single use, and they last the whole dungeon. The shop is open while the DM sets traps and while you choose. First-round prices: Shove ${price('shove')}, Oil ${price('oil')}, Charm ${price('charm')}, Potion ${price('potion')}, Lens ${price('lens')}, Armour ${price('armour')}, Lock ${price('lock')}. Inflation: prices rise every round, to ${Math.round(c.INFLATION * 100)}% more by the last round, so buying early is cheaper.</p>
     <ul>
-      <li>Potion: +40 HP. Armour: half damage this round. Charm: resist one element this round.</li>
+      <li>Potion: +40 HP; you can carry ${c.POTION_CAP} at most. Armour: half damage this round. Charm: resist one element this round.</li>
       <li>Oil flask: one more scan. Lens: your next scan shows the real trap, even through a fake clue.</li>
       <li>Lock: you enter alone and take all the gold; anyone else on that door is locked out. You take ×${c.LOCK_MULT} damage.</li>
       <li>Shove: if your target picks your door, they spring the trap alone at ×1.5, and you pickpocket ${Math.round(c.PICKPOCKET * 100)}% of their gold after the loot. Two shoves on each other: both go in. A Lock on that door beats a Shove.</li>
@@ -1466,7 +1448,7 @@ function formatLog(log) {
   L(`Started ${new Date(log.started).toLocaleString()}${log.finished ? `, finished ${new Date(log.finished).toLocaleString()}` : ''}`);
   L(`Players: ${log.players.join(', ')}`);
   L(`Settings: ${log.settings.rounds} rounds per dungeon, ${log.settings.pace} pace`);
-  L(`Rules: ${log.config.startHp} HP and ${log.config.startGold} gold to start. Traps (from the DM's purse): ${Object.values(log.config.traps).map((t) => `${t.name} ${t.dmg} dmg for ${t.cost} gold`).join(', ')}. Fake clue ${log.config.illusionCost} gold. Shortage ${log.config.shortageCost} gold (x${log.config.shortageMult} price). Pickpocket ${Math.round((log.config.pickpocket || 0) * 100)}%.`);
+  L(`Rules: ${log.config.startHp} HP and ${log.config.startGold} gold to start. Traps (from the DM's purse): ${Object.values(log.config.traps).map((t) => `${t.name} ${t.dmg} dmg for ${t.cost} gold`).join(', ')}. Fake clue ${log.config.illusionCost} gold. Shop prices rise ${Math.round((log.config.inflation || 0) * 100)}% by the last round. Pickpocket ${Math.round((log.config.pickpocket || 0) * 100)}%.`);
   L(`Shop: ${Object.entries(log.config.shop).map(([k, v]) => `${k} ${v}`).join(', ')}`);
   if (log.totals) {
     L();
@@ -1489,7 +1471,6 @@ function formatLog(log) {
     const purseTotal = dg.rounds.reduce((s, r) => s + (r.purseIncome || 0), 0);
     const hiddenTotal = dg.rounds.reduce((s, r) => s + r.doors.reduce((t, x) => t + (x.hiddenGold || 0), 0), 0);
     const pockets = dg.rounds.flatMap((r) => r.pickpockets || []);
-    const shortages = dg.rounds.filter((r) => r.shortage).map((r) => `${r.shortage.item} (round ${r.round})`);
     const allBribes = dg.rounds.flatMap((r) => r.bribes || []);
     const follows = dg.rounds.flatMap((r) => (r.choices || []).filter((c) => c.following));
     L();
@@ -1508,8 +1489,7 @@ function formatLog(log) {
     const bribesPaid = allBribes.filter((b) => b.outcome === 'paid');
     const lastRound = dg.rounds[dg.rounds.length - 1];
     const unspent = lastRound ? (lastRound.purseEnd !== undefined ? lastRound.purseEnd : lastRound.purseLeft) : 0;
-    L(`  DM purse: received ${purseTotal}; built ${purseSpent} into traps, fake clues and Shortages (${hiddenTotal} of it hidden gold behind doors); paid ${bribesPaid.reduce((s, b) => s + b.amount, 0)} in bribes; ${unspent} unspent at the end (worth nothing)`);
-    L(`  Shortages: ${shortages.join(', ') || 'none'}`);
+    L(`  DM purse: received ${purseTotal}; built ${purseSpent} into traps and fake clues (${hiddenTotal} of it hidden gold behind doors); paid ${bribesPaid.reduce((s, b) => s + b.amount, 0)} in bribes; ${unspent} unspent at the end (worth nothing)`);
     L(`  Bribes: ${allBribes.length} offered, ${allBribes.filter((b) => b.answer === 'accepted').length} accepted, ${allBribes.filter((b) => b.answer === 'declined').length} declined, ${bribesPaid.length} paid`);
     L(`  Following: ${follows.length} follow plans; ${follows.filter((c) => c.door).length} went through a door, ${follows.filter((c) => !c.door).length} rested`);
     L(`  Pickpockets: ${pockets.length ? pockets.map((x) => `${x.shover} took ${x.stolen} from ${x.target}`).join(', ') : 'none'}`);
@@ -1518,7 +1498,7 @@ function formatLog(log) {
       L(`Round ${r.round}   ${r.bait} bait gold placed${r.dmTimedOut ? ' (DM timed out)' : ''}`);
       const pStart = r.purseStart !== undefined ? r.purseStart : r.purseAvailable;
       L(`  DM purse: ${pStart} at the start (+${r.purseIncome} this round); built ${r.purseSpent}; bribes paid ${r.bribesPaid || 0}; ${r.purseEnd !== undefined ? r.purseEnd : r.purseLeft} left after the round`);
-      if (r.shortage) L(`  Shortage: ${r.shortage.item} ${r.shortage.normal} -> ${r.shortage.price} gold (cost the DM ${r.shortage.cost})`);
+      if (r.prices) L(`  Shop prices: ${Object.entries(r.prices).map(([k, v]) => `${k} ${v}`).join(', ')}`);
       r.doors.forEach((x) => L(`  Door ${x.door}: ${x.gold} gold + ${x.hiddenGold || 0} hidden, ${x.trap ? x.trap + ' trap' : 'no trap'}, clue shown: ${x.clueShown}${x.illusion !== null ? ' (illusion)' : ''}`));
       if (r.choices) {
         L('  Choices:');
@@ -1554,7 +1534,7 @@ function formatLog(log) {
   return out.join('\n') + '\n';
 }
 function shopLine(e) {
-  if (e.bought) return `${e.player} bought ${e.bought} (${e.cost}${e.shortage ? ', Shortage price' : ''})`;
+  if (e.bought) return `${e.player} bought ${e.bought} (${e.cost})`;
   if (e.drank) return `${e.player} drank a potion (${e.hpBefore} to ${e.hpAfter} HP)`;
   if (e.usedLens) return `${e.player} used a lens on door ${e.usedLens} and saw ${e.saw}`;
   if (e.scanned) return `${e.player} scanned door ${e.scanned}${e.lens ? ' with a Lens' : ''} and saw ${e.saw}`;
@@ -1646,15 +1626,6 @@ document.addEventListener('click', (e) => {
     case 'dmCard': dmApply((x) => { x.tier = v; x.element = ui.dmEl; }); Sound.play('place'); break;
     case 'dmFake': dmApply((x) => { x.illusion = v; }); Sound.play('illusion'); break;
     case 'dmClear': dmApply((x) => { x.tier = 'none'; x.illusion = 'honest'; }); Sound.play('shove'); break;
-    case 'dmShortage': {
-      const was = ui.dmShortage;
-      ui.dmShortage = v || '';
-      if (dmCost() > D().dm.purse) { ui.dmShortage = was; Sound.play('empty'); toast('Your purse can’t pay for that.'); break; }
-      Sound.play('coins', 1);
-      sendDraft();
-      render();
-      break;
-    }
     case 'dmEven': evenGold(); Sound.play('coins', 3); sendDraft(); render(); break;
     case 'dmBait': baitGold(Math.min(ui.dmSel || 0, ui.dm.length - 1)); Sound.play('coins', 4); sendDraft(); render(); break;
     case 'ready': sendReady(); break;
@@ -1691,7 +1662,7 @@ document.addEventListener('click', (e) => {
       const b = ui.bribe;
       socket.emit('bribe', { to: b.to, door: b.door, amount: b.amount, company: b.company }, (r) => {
         ack(r);
-        if (r && r.ok) { Sound.play('coins', 2); toast(S.phase === 'dm' ? 'Offer sent. It arrives when the doors open.' : 'Offer sent.'); ui.bribe.to = ''; }
+        if (r && r.ok) { Sound.play('coins', 2); toast(S.phase === 'dm' ? 'Offer sent. It arrives when the doors open.' : 'Offer sent.', 'info'); ui.bribe.to = ''; }
       });
       break;
     }
@@ -1704,7 +1675,7 @@ document.addEventListener('click', (e) => {
       if (v === 'shop' && !(ui.near && ui.near.type === 'shop')) {
         // the shop is a place: walk there
         Room.walkTo({ x: (64 - 26) / 332, y: (346 - 118) / 248 });
-        toast('Walking to the shopkeeper…');
+        toast('Walking to the shopkeeper…', 'info');
         break;
       }
       ui.sheet = v; render(); Sound.play('click'); break;
@@ -1722,7 +1693,7 @@ document.addEventListener('click', (e) => {
     case 'leaveYes':
       ui.confirmLeave = false; ui.sheet = null;
       socket.emit('leave'); store.del('gs_code'); S = null; render();
-      toast('You left the match.');
+      toast('You left the match.', 'info');
       break;
     case 'lockIn': {
       const plan = planForServer();
