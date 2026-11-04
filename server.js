@@ -19,6 +19,7 @@ const C = {
   START_HP: 100,
   START_GOLD: 40,
   START_POTIONS: 1,
+  POTION_CAP: 2, // the most Potions anyone can carry, so cheap early Potions can't be hoarded
   POTION_HEAL: 40,
   REST_HEAL: 10,
 
@@ -37,7 +38,7 @@ const C = {
     const f = rounds > 1 ? (round - 1) / (rounds - 1) : 1;
     return Math.floor((C.BAIT_FIRST + (C.BAIT_LAST - C.BAIT_FIRST) * f) / C.GOLD_STEP + 0.5 + 1e-9) * C.GOLD_STEP;
   },
-  // the trap purse: a working budget only the DM sees (traps, fake clues, Shortages).
+  // the trap purse: a working budget only the DM sees (traps, fake clues, bribes).
   // Per door it ramps from PURSE_FIRST to PURSE_LAST, rounded half up. Unspent purse carries
   // over within the dungeon and is worth nothing at the end.
   PURSE_FIRST: 8,
@@ -46,9 +47,13 @@ const C = {
     const f = rounds > 1 ? (round - 1) / (rounds - 1) : 1;
     return Math.floor(doors * (C.PURSE_FIRST + (C.PURSE_LAST - C.PURSE_FIRST) * f) + 0.5 + 1e-9);
   },
-  // Shortage: during trap setting the DM can pay to multiply one shop item's price for the round
-  SHORTAGE_COST: 6,
-  SHORTAGE_MULT: 2,
+  // inflation: shop prices rise each round, from the list price in round 1 to +INFLATION in the last
+  // round, rounded half up. They change only when a round starts, never while someone is shopping.
+  INFLATION: 0.5,
+  priceIn: (item, round, rounds) => {
+    const f = rounds > 1 ? (Math.max(1, round) - 1) / (rounds - 1) : 0;
+    return Math.floor(C.SHOP[item].cost * (1 + C.INFLATION * f) + 0.5 + 1e-9);
+  },
   // a landing Shove also steals this share of the target's gold (rounded down)
   PICKPOCKET: 0.1,
   // following: in the last FOLLOW_FREEZE seconds of choosing nobody can start or stop following
@@ -162,13 +167,13 @@ const PUBLIC_CONFIG = {
   MIN_PLAYERS: C.MIN_PLAYERS, MAX_PLAYERS: C.MAX_PLAYERS,
   MIN_ROUNDS: C.MIN_ROUNDS, MAX_ROUNDS: C.MAX_ROUNDS,
   START_HP: C.START_HP, START_GOLD: C.START_GOLD, START_POTIONS: C.START_POTIONS,
-  POTION_HEAL: C.POTION_HEAL, REST_HEAL: C.REST_HEAL,
+  POTION_HEAL: C.POTION_HEAL, POTION_CAP: C.POTION_CAP, REST_HEAL: C.REST_HEAL,
   MIN_DOOR_GOLD: C.MIN_DOOR_GOLD, TRAPS: C.TRAPS, ILLUSION_COST: C.ILLUSION_COST,
   APPROACH: C.APPROACH, ROOM_BAGS: C.ROOM_BAGS, LOCK_MULT: C.LOCK_MULT, SHOVE_MULT: C.SHOVE_MULT,
   RESIST: C.RESIST, WEAK: C.WEAK, CHARM: C.CHARM, ARMOUR: C.ARMOUR,
   HAUNT_STEAL: C.HAUNT_STEAL, DEATH_DROP: C.DEATH_DROP, SHOP: C.SHOP,
   BAIT_FIRST: C.BAIT_FIRST, BAIT_LAST: C.BAIT_LAST,
-  GOLD_STEP: C.GOLD_STEP, SHORTAGE_COST: C.SHORTAGE_COST, SHORTAGE_MULT: C.SHORTAGE_MULT, PICKPOCKET: C.PICKPOCKET,
+  GOLD_STEP: C.GOLD_STEP, INFLATION: C.INFLATION, PICKPOCKET: C.PICKPOCKET,
   FOLLOW_FREEZE: C.FOLLOW_FREEZE, BRIBE_MIN: C.BRIBE_MIN, BRIBES_PER_ROUND: C.BRIBES_PER_ROUND, BRIBE_CUTOFF: C.BRIBE_CUTOFF,
   // the same windows in real milliseconds, after TIME_SCALE (see below), so the client greys out buttons on time
   FOLLOW_FREEZE_MS: C.FOLLOW_FREEZE * 1000 * Number(process.env.TIME_SCALE || 1), BRIBE_CUTOFF_MS: C.BRIBE_CUTOFF * 1000 * Number(process.env.TIME_SCALE || 1),
@@ -264,7 +269,7 @@ function startMatch(room) {
       settings: { ...room.settings },
       config: {
         startHp: C.START_HP, startGold: C.START_GOLD, traps: C.TRAPS, illusionCost: C.ILLUSION_COST,
-        shortageCost: C.SHORTAGE_COST, shortageMult: C.SHORTAGE_MULT, pickpocket: C.PICKPOCKET,
+        inflation: C.INFLATION, pickpocket: C.PICKPOCKET,
         followFreeze: C.FOLLOW_FREEZE, bribeMin: C.BRIBE_MIN, bribesPerRound: C.BRIBES_PER_ROUND, bribeCutoff: C.BRIBE_CUTOFF,
         shop: Object.fromEntries(Object.entries(C.SHOP).map(([k, v]) => [k, v.cost])),
       },
@@ -298,7 +303,7 @@ function startDungeon(room) {
     };
   }
   m.dungeon = {
-    dmId, advIds, doorsCount, rounds, round: 0, T, purse: 0, budget: 0, shortage: null, snap: {}, adv,
+    dmId, advIds, doorsCount, rounds, round: 0, T, purse: 0, budget: 0, snap: {}, adv,
     doors: null, draft: null, actions: {}, haunts: {}, ghostDone: {}, lens: {},
     lastResult: null, scores: null, history: [], awards: null, pos: {}, known: {}, scans: {}, scanCount: {},
   };
@@ -331,11 +336,11 @@ function takeSnapshot(d) {
   d.snap = {};
   for (const id of d.advIds) d.snap[id] = { hp: d.adv[id].hp, gold: d.adv[id].gold };
 }
-// the shop price right now: a Shortage multiplies one item's price from the moment the doors open
+// the shop price right now (setup counts as round 1)
 function priceOf(d, item) {
-  const base = C.SHOP[item].cost;
-  return d && d.shortage && d.shortage.item === item ? d.shortage.price : base;
+  return C.priceIn(item, d.round, d.rounds);
 }
+const pricesIn = (round, rounds) => Object.fromEntries(Object.keys(C.SHOP).map((k) => [k, C.priceIn(k, round, rounds)]));
 
 /* ---------- following and bribes ---------- */
 // the plan that counts right now: the locked-in one, else the unlocked draft
@@ -448,7 +453,6 @@ function startRound(room) {
   d.purseIncome = C.purseIncome(d.doorsCount, d.round, d.rounds);
   d.purse += d.purseIncome; // unspent purse carries over
   d.purseStart = d.purse;
-  d.shortage = null; // prices go back to normal every round
   // fresh oil every round, up to what a lantern can carry
   for (const id of livingIds(d)) {
     const st = d.adv[id];
@@ -515,24 +519,17 @@ function validateDM(d, draft) {
     const hidden = (trap ? C.TRAPS[trap.tier].cost : 0) + (illusion !== null ? C.ILLUSION_COST : 0);
     doors.push({ gold, trap, illusion, hidden });
   }
-  let shortage = null;
-  if (draft.shortage !== null && draft.shortage !== undefined && draft.shortage !== '') {
-    if (!C.SHOP[draft.shortage]) return { ok: false, error: 'Pick a shop item for the Shortage.' };
-    shortage = draft.shortage;
-    cost += C.SHORTAGE_COST;
-  }
   if (sum !== d.budget) {
     return { ok: false, error: `Place exactly ${d.budget} gold (you placed ${sum}).` };
   }
   if (cost > d.purse) {
     return { ok: false, error: `That costs ${cost} gold. Your purse has ${d.purse}.` };
   }
-  return { ok: true, doors, cost, shortage };
+  return { ok: true, doors, cost };
 }
 
-function commitDM(room, doors, cost, timedOut, shortage) {
+function commitDM(room, doors, cost, timedOut) {
   const d = room.match.dungeon;
-  d.shortage = shortage ? { item: shortage, was: C.SHOP[shortage].cost, price: C.SHOP[shortage].cost * C.SHORTAGE_MULT } : null;
   dlog(room).rounds.push({
     round: d.round,
     bait: d.budget,
@@ -541,7 +538,7 @@ function commitDM(room, doors, cost, timedOut, shortage) {
     purseAvailable: d.purse,
     purseSpent: cost,
     purseLeft: d.purse - cost,
-    shortage: d.shortage ? { item: shortage, price: d.shortage.price, normal: d.shortage.was, cost: C.SHORTAGE_COST } : null,
+    prices: pricesIn(d.round, d.rounds),
     dmTimedOut: !!timedOut,
     doors: doors.map((x, i) => ({
       door: ROMAN[i], gold: x.gold, trap: trapText(x.trap), hiddenGold: x.hidden,
@@ -565,13 +562,13 @@ function dmTimeout(room) {
   if (!v.ok && d.draft && Array.isArray(d.draft.doors) && d.draft.doors.length === d.doorsCount) {
     // keep the DM's traps, fix the gold
     const g = evenGold(d);
-    v = validateDM(d, { doors: d.draft.doors.map((x, i) => ({ ...x, gold: g[i] })), shortage: d.draft.shortage });
+    v = validateDM(d, { doors: d.draft.doors.map((x, i) => ({ ...x, gold: g[i] })) });
   }
   if (!v.ok) {
     const g = evenGold(d);
     v = validateDM(d, { doors: g.map((gold) => ({ gold, trap: null, illusion: null })) });
   }
-  commitDM(room, v.doors, v.cost, true, v.shortage);
+  commitDM(room, v.doors, v.cost, true);
 }
 
 const FROZEN = `Too late: nobody can start or stop following in the last ${C.FOLLOW_FREEZE} seconds.`;
@@ -711,7 +708,6 @@ function resolveRound(room) {
   const share = {};
   const result = {
     round: d.round, doors: [], rests: [], bribes: [], pickpockets: [], haunts: [], deaths: [], dmTimedOut: d.dmTimedOut, act, before, after: null,
-    shortage: d.shortage ? { item: d.shortage.item, price: d.shortage.price, was: d.shortage.was } : null,
   };
   const landed = []; // Shoves that landed: { shover, target, door }
 
@@ -1180,8 +1176,9 @@ function viewFor(room, p) {
       const seen = snapshotted && id !== p.id && d.snap && d.snap[id] ? d.snap[id] : s;
       return { id, hp: seen.hp, gold: seen.gold, affinity: s.affinity, alive: s.alive, left: !!s.left, ready };
     }),
-    // a Shortage is public once the doors open, and lasts until the round ends
-    shortage: d.shortage && ['adv', 'results'].includes(room.phase) ? { ...d.shortage } : null,
+    // shop prices (they rise each round) and next round's, so buying early can be weighed
+    prices: pricesIn(d.round, d.rounds),
+    nextPrices: d.round >= 1 && d.round < d.rounds ? pricesIn(d.round + 1, d.rounds) : null,
     doors: d.doors ? d.doors.map((x, i) => {
       if (role !== 'adv') return { gold: x.gold, clue: x.clue };
       const k = (d.known[p.id] || {})[i];
@@ -1198,7 +1195,6 @@ function viewFor(room, p) {
       doors: r.doors.map((x) => ({ index: x.index, lines: x.lines })),
       rests: r.rests.map((x) => ({ id: x.id, healed: x.healed, auto: !!x.auto, follow: x.follow || null, why: x.why || null })),
       bribes: r.bribes || [],
-      shortage: r.shortage || null,
       pickpockets: r.pickpockets || [],
       haunts: r.haunts,
       deaths: r.deaths,
@@ -1207,7 +1203,7 @@ function viewFor(room, p) {
   if (role === 'dm') {
     // the purse, what it bought and the hidden gold behind each door are the DM's secret
     dv.dm = {
-      purse: d.purse, draft: d.draft, doors: d.doors, timedOut: d.dmTimedOut, shortage: d.shortage,
+      purse: d.purse, draft: d.draft, doors: d.doors, timedOut: d.dmTimedOut,
       nextIncome: d.round < d.rounds ? C.purseIncome(d.doorsCount, d.round + 1, d.rounds) : 0,
       bribes: (d.bribes || []).map((b) => ({ id: b.id, to: b.to, door: b.door, amount: b.amount, company: b.company, delivered: !!b.delivered, answer: b.answer || null, outcome: b.outcome || null })),
       bribesClosed: bribesClosed(room),
@@ -1377,11 +1373,12 @@ io.on('connection', (socket) => {
     const price = priceOf(d, item); // the server always charges the current price
     if (st.gold < price) return reply(cb, { error: `You need ${price} gold.` });
     if (item === 'oil' && st.flasks >= C.flaskCap(d.doorsCount)) return reply(cb, { error: `Your lantern holds ${C.flaskCap(d.doorsCount)} flasks at most.` });
+    if (item === 'potion' && st.potions >= C.POTION_CAP) return reply(cb, { error: `You can carry ${C.POTION_CAP} Potions at most.` });
     st.gold -= price;
     if (item === 'potion') st.potions++;
     else if (item === 'oil') st.flasks++;
     else st.inv[item]++;
-    shopLog(room, player.id, { bought: item, cost: price, ...(price !== it.cost ? { shortage: true } : {}) });
+    shopLog(room, player.id, { bought: item, cost: price });
     reply(cb, { ok: true });
     broadcast(room);
   });
@@ -1440,12 +1437,12 @@ io.on('connection', (socket) => {
   socket.on('dmSubmit', (draft, cb) => {
     const { room, player, d } = ctx(socket);
     if (!d || player.id !== d.dmId) return;
-    // traps, fake clues and Shortages can only be set before the doors open
+    // traps and fake clues can only be set before the doors open
     if (room.phase !== 'dm') return reply(cb, { error: 'You can only build while the doors are sealed.' });
     const v = validateDM(d, draft);
     if (!v.ok) return reply(cb, { error: v.error });
     reply(cb, { ok: true });
-    commitDM(room, v.doors, v.cost, false, v.shortage);
+    commitDM(room, v.doors, v.cost, false);
   });
 
   socket.on('action', (a, cb) => {
