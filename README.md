@@ -44,7 +44,7 @@ Sound is on by default and every player can turn it off with the Sound button. P
 
 ## Teaching new players
 
-The first time someone reaches a lobby, a short visual guide opens: 12 slides, each with a picture and two or three sentences (the gold and scoring, doors and scanning, speed, elements, the shop and Shortages, Shoves and Locks, following, ghosts, and the DM's purse and bribes). The lobby shows the host who has read it. During the game, the Help button opens the slide for whatever the player is doing right now.
+The first time someone reaches a lobby, a short visual guide opens: 12 slides, each with a picture and two or three sentences (the gold and scoring, doors and scanning, speed, elements, the shop and its rising prices, Shoves and Locks, following, ghosts, and the DM's purse and bribes). The lobby shows the host who has read it. During the game, the Help button opens the slide for whatever the player is doing right now.
 
 Inside the game, doors show a red Weak or green Resist badge based on your element, the DM's trap buttons say which players each element hurts, and step guides on the adventurer and DM panels show what to do next.
 
@@ -71,11 +71,10 @@ Adventurers spend each round in a top-down stone room: the doors along the top w
 
 The DM builds in the same room. Tap a door to select it, then use the **Traps** screen:
 
-- **Purse** shows your trap purse, which only you see. It pays for traps, fake clues, a Shortage and bribes. Unspent purse carries over to the next round, but it isn't score.
+- **Purse** shows your trap purse, which only you see. It pays for traps, fake clues and bribes. Unspent purse carries over to the next round, but it isn't score.
 - **The gold bar** splits the round's bait gold between the doors: drag the lines between sections (or use the arrow keys on a focused line). It always adds up and every door keeps at least 10. **Even** and **Bait** (most gold on the selected door) are one tap.
 - **Your hand:** pick an element, then tap a trap card to place it on the selected door. Cards you can't afford are greyed out.
 - **Fake clue:** make the selected door show any clue.
-- **Shortage:** double one shop item's price for the coming round. The shopkeeper announces it when the doors open.
 
 What you build on a door is gold hidden behind it: the cost of its trap and fake clue goes into that door's loot, for whoever survives it. The reveal shows each door's hidden gold.
 
@@ -132,7 +131,7 @@ Everything players can say lives in `messages.txt`: quick lines for adventurers,
 
 After each dungeon, players get awards based on what happened: Greediest, The Canary, Most Spiteful, Grave Robber, Daredevil, Campfire Coward, Untouchable, and Trapmaster for the DM.
 
-Between dungeons, at the end of the match, and back in the lobby afterwards, anyone can download the match log as text (easy to read) or JSON (for spreadsheets or scripts). It records every round: the DM's bait, purse spending, traps, hidden gold and Shortage, every bribe offer with its answer and outcome, everyone's choices, items and who they followed, what happened at each door, pickpockets, purchases, gains, scores and awards, with a summary per dungeon. Use it to tune the numbers after a playtest. It can't be downloaded mid-dungeon, because it contains traps and purchases that are still secret.
+Between dungeons, at the end of the match, and back in the lobby afterwards, anyone can download the match log as text (easy to read) or JSON (for spreadsheets or scripts). It records every round: the DM's bait, purse spending, traps, hidden gold and shop prices, every bribe offer with its answer and outcome, everyone's choices, items and who they followed, what happened at each door, pickpockets, purchases, gains, scores and awards, with a summary per dungeon. Use it to tune the numbers after a playtest. It can't be downloaded mid-dungeon, because it contains traps and purchases that are still secret.
 
 ## What's in the folder
 
@@ -151,20 +150,20 @@ Between dungeons, at the end of the match, and back in the lobby afterwards, any
 
 ## Tuning the numbers
 
-Every number in the game is in the `C` block at the top of `server.js`: HP, starting gold, trap damage and cost, bait and purse per round, Shortage cost, pickpocket share, the following freeze, bribe limits, item prices, approach multipliers, timers. Change them, restart, play again.
+Every number in the game is in the `C` block at the top of `server.js`: HP, starting gold, trap damage and cost, bait and purse per round, shop inflation, pickpocket share, the following freeze, bribe limits, item prices, approach multipliers, timers. Change them, restart, play again.
 
 For quick solo testing, `TIME_SCALE=0.2 npm start` makes every timer five times shorter.
 
 ## Rules summary
 
 - Each round the DM places bait gold on the doors (at least 10 each, in steps of 5). Bait per door ramps from 20 in round 1 to 60 in the last round. The dungeon's **treasury** is all its bait.
-- The DM also gets a secret **trap purse** each round. It buys traps (Minor 20 dmg for 8 gold, Major 35 for 14, Deadly 50 for 20; every trap has an element), fake clues (5) and one Shortage (6: an item costs double this round). Unspent purse carries over but isn't score.
+- The DM also gets a secret **trap purse** each round. It buys traps (Minor 20 dmg for 8 gold, Major 35 for 14, Deadly 50 for 20; every trap has an element), fake clues (5) and bribes. Unspent purse carries over but isn't score.
 - What the DM builds on a door is hidden gold behind it, looted along with the bait by whoever survives.
 - A trapped door's clue shows its real element. An empty door shows nothing. An illusion fakes either.
 - Adventurers secretly pick a door and Sprint (3 bags, ×1.5), Walk (2 bags, ×1) or Sneak (1 bag, ×0.5), or Rest (+10 HP).
 - Only the fastest group into a room springs the trap. A room needs 3 bags to empty; with more, gold splits by bags.
 - Elements: your element resists itself (×0.5) and is weak to the one that beats it (×1.5). Water > Fire > Air > Earth > Water.
-- Items are single use: Shove 5, Oil flask 7, Charm 8, Potion 12, Lens 12, Armour 14, Lock 15.
+- Items are single use and last the whole dungeon. First-round prices: Shove 5, Oil flask 7, Charm 8, Potion 12, Lens 12, Armour 14, Lock 15. Prices rise every round, to 50% more by the last round (the shop shows next round's price), so buying early is cheaper. You can carry at most 2 Potions.
 - A Shove that lands also pickpockets 10% of the target's gold after the loot. A Lock on that door stops it.
 - Instead of a door, you can secretly follow another adventurer: you copy their final door and speed, not their items. The leader only learns that someone follows them. No starting or stopping in the last 10 seconds, and no shoving along a following link.
 - The DM can secretly bribe up to 2 adventurers a round to pick a door (from 3 gold, out of the purse). It's paid on entry, before any trap, and returns to the purse otherwise.
