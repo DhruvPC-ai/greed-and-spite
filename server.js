@@ -90,7 +90,7 @@ const C = {
     sneak: { name: 'Sneak', bags: 1, mult: 0.5 },
   },
   ROOM_BAGS: 3,
-  LOCK_MULT: 2.5,
+  LOCK_MULT: 2.0,
   SHOVE_MULT: 1.5,
 
   RESIST: 0.5,
@@ -101,13 +101,29 @@ const C = {
   HAUNT_STEAL: 0.25,
   DEATH_DROP: 0.5,
 
+  // element perks, on top of the wheel (RESIST/WEAK). A perk only changes a number inside a rule
+  // everyone already knows; anything an element doesn't list uses the plain number above.
+  //   damage: multiplies trap damage taken    loot: multiplies your bags when a room is split by bags
+  //   maxHp: starting and maximum HP           rest / potion: HP healed by resting / a Potion
+  //   pickpocket: share a landed Shove steals  shopPrice: share of the (inflated) price you pay
+  // Rule to keep: a Deadly trap on a sprinter weak to it (50 × 1.5 × 1.5 = 112) must still kill every
+  // element from full HP (Air takes 123, Earth 101, Water has 110 HP).
+  PERKS: {
+    air: { loot: 1.1, damage: 1.1 },              // thief, glass cannon
+    earth: { damage: 0.9, rest: 5 },              // tank
+    water: { maxHp: 110, rest: 20, potion: 50 },  // healer, survivor
+    fire: { pickpocket: 0.25, shopPrice: 0.75 },  // swordsman, plunderer
+  },
+  // Fire's shop price: a share of the current price, rounded half up, at least 1 gold
+  perkPrice: (price, share) => Math.max(1, Math.floor(price * share + 0.5 + 1e-9)),
+
   // shop prices: cheap for items that cause infighting, expensive for items that only protect
   SHOP: {
     potion: { name: 'Potion', cost: 12, text: 'Heal 40 HP. Drink any time during your turn.' },
     armour: { name: 'Armour', cost: 14, text: 'Take half damage this round.' },
     charm: { name: 'Charm', cost: 8, text: 'Resist one element of your choice this round.' },
     lens: { name: 'Lens', cost: 12, text: 'Fit it to your lantern: your next scan shows the real trap and its strength, even through a fake clue. It still takes a flask of oil, and works once a round.' },
-    lock: { name: 'Lock', cost: 15, text: 'Enter alone and take all the gold. Others on that door are locked out. You take 2.5× damage.' },
+    lock: { name: 'Lock', cost: 15, text: 'Enter alone and take all the gold. Others on that door are locked out. You take 2× damage.' },
     shove: { name: 'Shove', cost: 5, text: 'If your target picks your door, they spring the trap alone at 1.5×, and you pickpocket 10% of their gold.' },
   },
 };
@@ -115,6 +131,13 @@ const C = {
 const ELEMENTS = ['fire', 'water', 'earth', 'air'];
 const WEAK_TO = { fire: 'water', air: 'fire', earth: 'air', water: 'earth' };
 const ITEM_KEYS = ['armour', 'charm', 'lens', 'lock', 'shove'];
+// an adventurer's perk number, or the plain one. Ghosts have no perks (they never rest, loot, buy or
+// take damage anyway), and nor does anyone who hasn't picked an element yet.
+function perkOf(st, key, plain) {
+  const p = st && st.alive !== false && st.affinity ? C.PERKS[st.affinity] : null;
+  return p && p[key] !== undefined ? p[key] : plain;
+}
+const maxHpOf = (st) => perkOf(st, 'maxHp', C.START_HP);
 
 // what the client is allowed to know about the config
 /* ============================================================
@@ -182,7 +205,7 @@ const PUBLIC_CONFIG = {
   MIN_DOOR_GOLD: C.MIN_DOOR_GOLD, TRAPS: C.TRAPS, ILLUSION_COST: C.ILLUSION_COST,
   APPROACH: C.APPROACH, ROOM_BAGS: C.ROOM_BAGS, LOCK_MULT: C.LOCK_MULT, SHOVE_MULT: C.SHOVE_MULT,
   RESIST: C.RESIST, WEAK: C.WEAK, CHARM: C.CHARM, ARMOUR: C.ARMOUR,
-  HAUNT_STEAL: C.HAUNT_STEAL, DEATH_DROP: C.DEATH_DROP, SHOP: C.SHOP,
+  HAUNT_STEAL: C.HAUNT_STEAL, DEATH_DROP: C.DEATH_DROP, SHOP: C.SHOP, PERKS: C.PERKS,
   BAIT_FIRST: C.BAIT_FIRST, BAIT_LAST: C.BAIT_LAST,
   GOLD_STEP: C.GOLD_STEP, INFLATION: C.INFLATION, PICKPOCKET: C.PICKPOCKET,
   FOLLOW_FREEZE: C.FOLLOW_FREEZE, BRIBE_MIN: C.BRIBE_MIN, BRIBES_PER_ROUND: C.BRIBES_PER_ROUND, BRIBE_CUTOFF: C.BRIBE_CUTOFF,
@@ -280,7 +303,8 @@ function startMatch(room) {
       settings: { ...room.settings },
       config: {
         startHp: C.START_HP, startGold: C.START_GOLD, traps: C.TRAPS, illusionCost: C.ILLUSION_COST,
-        inflation: C.INFLATION, pickpocket: C.PICKPOCKET,
+        inflation: C.INFLATION, pickpocket: C.PICKPOCKET, lockMult: C.LOCK_MULT, restHeal: C.REST_HEAL, potionHeal: C.POTION_HEAL,
+        perks: C.PERKS,
         followFreeze: C.FOLLOW_FREEZE, bribeMin: C.BRIBE_MIN, bribesPerRound: C.BRIBES_PER_ROUND, bribeCutoff: C.BRIBE_CUTOFF,
         shop: Object.fromEntries(Object.entries(C.SHOP).map(([k, v]) => [k, v.cost])),
       },
@@ -311,6 +335,7 @@ function startDungeon(room) {
       affinity: null,
       alive: true,
       setupReady: false,
+      setupBuys: [], // what they bought before round 1, repriced if they change element (Fire pays less)
     };
   }
   m.dungeon = {
@@ -347,11 +372,15 @@ function takeSnapshot(d) {
   d.snap = {};
   for (const id of d.advIds) d.snap[id] = { hp: d.adv[id].hp, gold: d.adv[id].gold };
 }
-// the shop price right now (setup counts as round 1)
-function priceOf(d, item) {
-  return C.priceIn(item, d.round, d.rounds);
+// the shop price right now (setup counts as round 1) for this adventurer: Fire pays a share of it
+function priceOf(d, item, st) {
+  return priceFor(st, C.priceIn(item, d.round, d.rounds));
 }
-const pricesIn = (round, rounds) => Object.fromEntries(Object.keys(C.SHOP).map((k) => [k, C.priceIn(k, round, rounds)]));
+function priceFor(st, list) {
+  const share = perkOf(st, 'shopPrice', 1);
+  return share === 1 ? list : C.perkPrice(list, share);
+}
+const pricesIn = (round, rounds, st) => Object.fromEntries(Object.keys(C.SHOP).map((k) => [k, priceFor(st, C.priceIn(k, round, rounds))]));
 
 /* ---------- following and bribes ---------- */
 // the plan that counts right now: the locked-in one, else the unlocked draft
@@ -475,7 +504,10 @@ const canRoam = (phase) => phase === 'setup' || phase === 'dm' || phase === 'adv
 
 function endSetup(room) {
   const d = room.match.dungeon;
-  for (const id of d.advIds) if (!d.adv[id].affinity) d.adv[id].affinity = 'fire';
+  for (const id of d.advIds) {
+    const st = d.adv[id];
+    if (!st.affinity) { st.affinity = 'fire'; st.hp = maxHpOf(st); } // anything bought before stays at the price paid
+  }
   for (const id of d.advIds) dlog(room).affinities[nameOf(room, id)] = d.adv[id].affinity;
   startRound(room);
 }
@@ -671,6 +703,7 @@ function damageFor(st, act, trap, mult) {
   let m = mult;
   if (trap.element === st.affinity) m *= C.RESIST;
   if (trap.element === WEAK_TO[st.affinity]) m *= C.WEAK;
+  m *= perkOf(st, 'damage', 1); // Air takes more, Earth less
   if (act.charm && act.charm === trap.element) m *= C.CHARM;
   if (act.armour) m *= C.ARMOUR;
   return Math.floor(C.TRAPS[trap.tier].dmg * m + 1e-9);
@@ -828,9 +861,11 @@ function resolveRound(room) {
         triggers = entrants.filter((id) => act[id].approach === fastest);
         mult = C.APPROACH[fastest].mult;
       }
-      const bags = entrants.reduce((s, id) => s + C.APPROACH[act[id].approach].bags, 0);
+      // each entrant's weight is their bags × their element's loot factor (Air carries more)
+      const weight = (id) => C.APPROACH[act[id].approach].bags * perkOf(d.adv[id], 'loot', 1);
+      const bags = entrants.reduce((s, id) => s + weight(id), 0);
       const denom = Math.max(C.ROOM_BAGS, bags);
-      for (const id of entrants) myShare[id] = Math.floor((loot * C.APPROACH[act[id].approach].bags) / denom);
+      for (const id of entrants) myShare[id] = Math.floor((loot * weight(id)) / denom + 1e-9);
     }
     for (const id of entrants) {
       if (act[id].shove && !entrants.includes(act[id].shove)) {
@@ -921,7 +956,7 @@ function resolveRound(room) {
   landed.sort((a, b) => joinOrder(a.shover) - joinOrder(b.shover));
   for (const sh of landed) {
     if (died.includes(sh.shover)) continue;
-    const stolen = Math.floor(d.adv[sh.target].gold * C.PICKPOCKET + 1e-9);
+    const stolen = Math.floor(d.adv[sh.target].gold * perkOf(d.adv[sh.shover], 'pickpocket', C.PICKPOCKET) + 1e-9); // Fire steals more
     d.adv[sh.target].gold -= stolen;
     d.adv[sh.shover].gold += stolen;
     result.pickpockets.push({ ...sh, stolen });
@@ -932,7 +967,7 @@ function resolveRound(room) {
   for (const id of living) {
     if (act[id].type === 'rest') {
       const st = d.adv[id];
-      const healed = Math.min(C.REST_HEAL, C.START_HP - st.hp);
+      const healed = Math.max(0, Math.min(perkOf(st, 'rest', C.REST_HEAL), maxHpOf(st) - st.hp));
       st.hp += healed;
       result.rests.push({ id, healed, auto: act[id].auto, follow: act[id].follow || null, why: act[id].why || null });
     }
@@ -1223,11 +1258,12 @@ function viewFor(room, p) {
       if (room.phase === 'setup') ready = s.setupReady;
       if (room.phase === 'adv') ready = s.alive ? !!d.actions[id] : !!d.ghostDone[id];
       const seen = snapshotted && id !== p.id && d.snap && d.snap[id] ? d.snap[id] : s;
-      return { id, hp: seen.hp, gold: seen.gold, affinity: s.affinity, alive: s.alive, left: !!s.left, ready };
+      return { id, hp: seen.hp, maxHp: maxHpOf(s), gold: seen.gold, affinity: s.affinity, alive: s.alive, left: !!s.left, ready };
     }),
-    // shop prices (they rise each round) and next round's, so buying early can be weighed
-    prices: pricesIn(d.round, d.rounds),
-    nextPrices: d.round >= 1 && d.round < d.rounds ? pricesIn(d.round + 1, d.rounds) : null,
+    // shop prices (they rise each round) and next round's, so buying early can be weighed. Each
+    // adventurer gets their own: Fire's are discounted. Everyone else sees the list prices.
+    prices: pricesIn(d.round, d.rounds, d.adv[p.id]),
+    nextPrices: d.round >= 1 && d.round < d.rounds ? pricesIn(d.round + 1, d.rounds, d.adv[p.id]) : null,
     doors: d.doors ? d.doors.map((x, i) => {
       if (role !== 'adv') return { gold: x.gold, clue: x.clue };
       const k = (d.known[p.id] || {})[i];
@@ -1410,10 +1446,24 @@ io.on('connection', (socket) => {
     startMatch(room);
   });
 
-  socket.on('affinity', ({ element } = {}) => {
+  socket.on('affinity', ({ element } = {}, cb) => {
     const { room, player, d } = ctx(socket);
     if (!d || room.phase !== 'setup' || !d.adv[player.id] || !ELEMENTS.includes(element)) return;
-    d.adv[player.id].affinity = element;
+    const st = d.adv[player.id];
+    if (st.setupReady || st.affinity === element) return reply(cb, { ok: true });
+    // what you bought before round 1 costs your element's price, so a Fire discount can't be kept
+    // by switching away from Fire afterwards (and switching to Fire refunds the difference)
+    const was = st.affinity;
+    const cost = (aff) => st.setupBuys.reduce((t, item) => t + priceOf(d, item, { ...st, affinity: aff }), 0);
+    const change = cost(element) - cost(was);
+    if (change > st.gold) return reply(cb, { error: `Switching to ${cap(element)} costs ${change} more gold for what you’ve bought. You have ${st.gold}.` });
+    st.gold -= change;
+    st.affinity = element;
+    // nothing can hurt anyone before round 1, so everyone is at full HP: Water's is 110
+    st.hp = maxHpOf(st);
+    if (d.snap[player.id]) d.snap[player.id].hp = st.hp; // HP and element are public here; gold stays snapshotted
+    if (change) shopLog(room, player.id, { repriced: st.setupBuys.slice(), from: was, to: element, change });
+    reply(cb, { ok: true, change });
     broadcast(room);
   });
 
@@ -1432,12 +1482,13 @@ io.on('connection', (socket) => {
     const st = d.adv[player.id];
     const it = C.SHOP[item];
     if (!st || !st.alive || !it) return;
-    const price = priceOf(d, item); // the server always charges the current price
+    const price = priceOf(d, item, st); // the server always charges the current price (Fire's discounted)
     if (st.gold < price) return reply(cb, { error: `You need ${price} gold.` });
     if (item === 'potion' && st.potions >= C.POTION_CAP) return reply(cb, { error: `You can carry ${C.POTION_CAP} Potions at most.` });
     st.gold -= price;
     if (item === 'potion') st.potions++;
     else st.inv[item]++;
+    if (room.phase === 'setup') st.setupBuys.push(item);
     shopLog(room, player.id, { bought: item, cost: price });
     reply(cb, { ok: true });
     broadcast(room);
@@ -1448,10 +1499,10 @@ io.on('connection', (socket) => {
     if (!d || !['setup', 'dm', 'adv'].includes(room.phase)) return;
     const st = d.adv[player.id];
     if (!st || !st.alive || st.potions < 1) return;
-    if (st.hp >= C.START_HP) return reply(cb, { error: 'You are already at full HP.' });
+    if (st.hp >= maxHpOf(st)) return reply(cb, { error: 'You are already at full HP.' });
     st.potions--;
     const hpBefore = st.hp;
-    st.hp = Math.min(C.START_HP, st.hp + C.POTION_HEAL);
+    st.hp = Math.min(maxHpOf(st), st.hp + perkOf(st, 'potion', C.POTION_HEAL));
     shopLog(room, player.id, { drank: 'potion', hpBefore, hpAfter: st.hp });
     reply(cb, { ok: true });
     broadcast(room);

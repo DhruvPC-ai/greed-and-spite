@@ -44,7 +44,7 @@ Sound is on by default and every player can turn it off with the Sound button. P
 
 ## Teaching new players
 
-The first time someone reaches a lobby, a short visual guide opens: 12 slides, each with a picture and two or three sentences (the gold and scoring, doors and scanning, speed, elements, the shop and its rising prices, Shoves and Locks, following, ghosts, and the DM's purse and bribes). The lobby shows the host who has read it. During the game, the Help button opens the slide for whatever the player is doing right now.
+The first time someone reaches a lobby, a short visual guide opens: 12 slides, each with a picture and two or three sentences (the gold and scoring, doors and scanning, speed, elements and their perks, the shop and its rising prices, Shoves and Locks, following, ghosts, and the DM's purse and bribes). The lobby shows the host who has read it. During the game, the Help button opens the slide for whatever the player is doing right now.
 
 Inside the game, doors show a red Weak or green Resist badge based on your element, the DM's trap buttons say which players each element hurts, and step guides on the adventurer and DM panels show what to do next.
 
@@ -52,7 +52,7 @@ Inside the game, doors show a red Weak or green Resist badge based on your eleme
 
 Everything fits in one window, with no scrolling:
 
-- **Left:** the party (portraits, HP, gold, element) with match scores at the bottom.
+- **Left:** the party (portraits, HP, gold, element) with match scores at the bottom. Tapping the element chain under the party (Water › Fire › Air › Earth) opens the **Elements** screen on the right; on a landscape phone the chain shrinks to its icons at the top of the party box.
 - **Middle:** the top-down room, with the action bar under it. The side-view door hall appears here only for the reveal and the scores.
 - **Right:** the selected screen.
 - **Far right:** a sidebar of icons that switch the screen: Gear up, Journal, Shop, Talk, History and Menu for adventurers (plus Offers when the DM bribes you); Traps, Bribe, Talk, History and Menu for the DM; Haunt for ghosts. A red dot means something needs you.
@@ -64,7 +64,7 @@ Everything fits in one window, with no scrolling:
 Adventurers spend each round in a top-down stone room: the doors along the top wall, a campfire in the middle, the shopkeeper inside an L-shaped stall in the bottom-left corner (you shop from above it or from its right), and the DM's statue on its plinth in the bottom-right corner. Everyone sees everyone else walk around in real time.
 
 - **Walking:** arrow keys or WASD, or click or tap where to go (tap-to-walk routes around the fire, the stall and the statue).
-- **The action button** (or E) does whatever you're next to: Shop, Scan Door II or Choose Door II, Rest by the fire, or Whisper to someone beside you.
+- **The action button** (or E) does whatever you're next to: Shop, Scan Door II, Rest by the fire, or Whisper to someone beside you. At a door you can't scan (already scanned, out of oil, no time left), it opens that door's journal page instead. Choosing a door only ever happens through its own **Choose** button, so you can't pick one by accident.
 - **Your plan** stays secret; where you stand means nothing, so standing at a door is a free bluff. If time runs out, the plan you've filled in counts even if you didn't lock it in. Instead of a door, your plan can be to follow someone (see below).
 
 ## The DM's trap workshop
@@ -81,6 +81,25 @@ What you build on a door is gold hidden behind it: the cost of its trap and fake
 The **Bribe** screen (while setting traps and while adventurers choose) sends secret offers: pick an adventurer, a door and an amount, and optionally "only if someone goes in with them". See Bribes below.
 
 Only the DM sees placed traps drawn on the floor in front of their doors, and a weakness tag over each adventurer showing the element that hurts them most. While adventurers choose, the DM watches the room and sees whose lantern is lit on which door.
+
+## Elements and perks
+
+Each adventurer picks an element in Gear up. Your element resists itself (½ damage) and is weak to the one that beats it (×1.5): Water beats Fire, Fire beats Air, Air beats Earth, Earth beats Water. Each element also has a perk, which only ever changes a number inside a rule everyone knows:
+
+| Element | Plays like | Perk |
+|---|---|---|
+| Air | Thief, glass cannon | Loot share ×1.1; damage taken ×1.1 |
+| Earth | Tank | Damage taken ×0.9; resting heals 5 instead of 10 |
+| Water | Healer, survivor | 110 max HP (starts at 110); resting heals 20; Potions heal 50 |
+| Fire | Swordsman, plunderer | Your Shoves steal 25% instead of 10%; 25% off in the shop |
+
+- **Loot:** in a room split by bags, Air's bags count ×1.1, so Air walking alone takes 2.2 of 3 shares and Air sprinting alone still takes the whole room. No gold is created: the extra comes from the others in the room or from gold that would have stayed with the DM. Locks still split equally.
+- **Fire's prices** are 75% of the current price, rounded half up (round 1: Shove 4, Charm 6, Potion 9, Lens 9, Armour 11, Lock 11). Fire's shop shows Fire's own prices. If you switch element in Gear up after buying something, what you bought is repriced at your new element's price (you pay or get back the difference), so a Fire discount can't be kept by switching away.
+- **Max HP** caps resting and Potions, and HP bars are drawn against each player's own max.
+- **The DM's hardest hit stays lethal for everyone at full HP:** a Deadly trap on a sprinter weak to it does 112 (Air takes 123, Earth 101, and Water has 110 HP).
+- Ghosts have no perks.
+
+The **Elements** screen (tap the element chain) shows your element first, with what it resists, what it's weak to and its perk, then the others, then who in the party has which element. The DM and ghosts can open it too. The full rules list the perks as well.
 
 ## Following
 
@@ -151,7 +170,7 @@ Between dungeons, at the end of the match, and back in the lobby afterwards, any
 
 ## Tuning the numbers
 
-Every number in the game is in the `C` block at the top of `server.js`: HP, starting gold, trap damage and cost, bait and purse per round, shop inflation, pickpocket share, the following freeze, bribe limits, item prices, approach multipliers, timers. Change them, restart, play again.
+Every number in the game is in the `C` block at the top of `server.js`: HP, starting gold, trap damage and cost, bait and purse per round, shop inflation, pickpocket share, the following freeze, bribe limits, item prices, approach multipliers, the Lock multiplier, element perks (`PERKS`), timers. Change them, restart, play again.
 
 For quick solo testing, `TIME_SCALE=0.2 npm start` makes every timer five times shorter.
 
@@ -161,11 +180,11 @@ For quick solo testing, `TIME_SCALE=0.2 npm start` makes every timer five times 
 - The DM also gets a secret **trap purse** each round. It buys traps (Minor 20 dmg for 8 gold, Major 35 for 14, Deadly 50 for 20; every trap has an element), fake clues (5) and bribes. Unspent purse carries over but isn't score.
 - What the DM builds on a door is hidden gold behind it, looted along with the bait by whoever survives.
 - A trapped door's clue shows its real element. An empty door shows nothing. An illusion fakes either.
-- Adventurers secretly pick a door and Sprint (3 bags, ×1.5), Walk (2 bags, ×1) or Sneak (1 bag, ×0.5), or Rest (+10 HP).
+- Adventurers secretly pick a door and Sprint (3 bags, ×1.5), Walk (2 bags, ×1) or Sneak (1 bag, ×0.5), or Rest (+10 HP; Earth 5, Water 20).
 - Only the fastest group into a room springs the trap. A room needs 3 bags to empty; with more, gold splits by bags.
-- Elements: your element resists itself (×0.5) and is weak to the one that beats it (×1.5). Water > Fire > Air > Earth > Water.
-- Items are single use and last the whole dungeon. First-round prices: Shove 5, Charm 8, Potion 12, Lens 12, Armour 14, Lock 15. Prices rise every round, to 50% more by the last round (the shop shows next round's price), so buying early is cheaper. You can carry at most 2 Potions.
-- A Shove that lands also pickpockets 10% of the target's gold after the loot. A Lock on that door stops it.
+- Elements: your element resists itself (×0.5) and is weak to the one that beats it (×1.5): Water beats Fire, Fire beats Air, Air beats Earth, Earth beats Water. Perks: Air loot share ×1.1 and damage taken ×1.1; Earth damage taken ×0.9 and rests 5; Water 110 HP, rests 20, Potions heal 50; Fire's Shoves steal 25% and Fire pays 75% in the shop.
+- Items are single use and last the whole dungeon. First-round prices: Shove 5, Charm 8, Potion 12, Lens 12, Armour 14, Lock 15. Prices rise every round, to 50% more by the last round (the shop shows next round's price), so buying early is cheaper. A Potion heals 40 (Water 50) up to your max HP; you can carry at most 2. A Lock takes all the room's gold and shuts everyone else out, at ×2 damage.
+- A Shove that lands also pickpockets 10% of the target's gold after the loot (25% for Fire). A Lock on that door stops it.
 - Instead of a door, you can secretly follow another adventurer: you copy their final door and speed, not their items. The leader only learns that someone follows them. No starting or stopping in the last 10 seconds, and no shoving along a following link.
 - Scanning a door takes a flask; you get one flask fewer than there are doors each round and can't buy more. Each adventurer may also ask the DM's statue one question a round about a door; the DM answers truthfully or lies (1 lie a round, 2 with five or more adventurers).
 - The DM can secretly bribe up to 2 adventurers a round to pick a door (from 3 gold, out of the purse). It's paid on entry, before any trap, and returns to the purse otherwise.

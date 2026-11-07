@@ -32,6 +32,25 @@ const CLUE = {
 };
 const ROMAN = ['I', 'II', 'III', 'IV', 'V', 'VI'];
 const VERB = { sprint: 'Sprint', walk: 'Walk', sneak: 'Sneak' };
+// element perks (from the server's config): one element's numbers, or the plain ones
+const perkOf = (el, key, plain) => { const p = el && cfg().PERKS ? cfg().PERKS[el] : null; return p && p[key] !== undefined ? p[key] : plain; };
+const maxHpOf = (a) => (a && a.maxHp) || cfg().START_HP;
+const restHealOf = (el) => perkOf(el, 'rest', cfg().REST_HEAL);
+const potionHealOf = (el) => perkOf(el, 'potion', cfg().POTION_HEAL);
+// a perk in words. 'short' for Gear up (+10% loot), 'exact' for the Elements screen (loot share ×1.1)
+function perkText(el, style = 'exact') {
+  const p = (cfg().PERKS || {})[el] || {};
+  const pct = (x) => Math.round(Math.abs(x - 1) * 100) + '%';
+  const out = [];
+  if (p.maxHp !== undefined) out.push(`${p.maxHp} HP`);
+  if (p.loot !== undefined) out.push(style === 'short' ? `${p.loot > 1 ? '+' : '−'}${pct(p.loot)} loot` : `loot share ×${p.loot}`);
+  if (p.damage !== undefined) out.push(style === 'short' ? `${p.damage > 1 ? '+' : '−'}${pct(p.damage)} damage taken` : `damage taken ×${p.damage}`);
+  if (p.rest !== undefined) out.push(`resting heals ${p.rest}`);
+  if (p.potion !== undefined) out.push(`Potions heal ${p.potion}`);
+  if (p.pickpocket !== undefined) out.push(`Shoves steal ${Math.round(p.pickpocket * 100)}%`);
+  if (p.shopPrice !== undefined) out.push(`${pct(p.shopPrice)} off in the shop`);
+  return out.join(', ');
+}
 const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : '');
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -155,9 +174,21 @@ function roomAction() {
   if (!n) return;
   if (n.type === 'shop') { openSheet('shop'); merchantTalk(); }
   else if (n.type === 'statue') openSheet('statue');
-  else if (n.type === 'door') { if (scanState(n.i).ok) startScan(n.i); else chooseDoor(n.i); }
+  else if (n.type === 'door') doorAction(n.i);
   else if (n.type === 'fire') restNow();
   else if (n.type === 'person') { ui.whisperTo = n.id; ui.whisperPick = null; openSheet('talk'); }
+}
+// E (or the action button) at a door scans it if it can. Otherwise it opens that door's journal page:
+// choosing a door only ever happens through its Choose button.
+function doorAction(i) {
+  const d = D();
+  if (!d || d.role !== 'adv' || S.phase !== 'adv') return;
+  if (scanState(i).ok) return startScan(i);
+  openDoorPage(i);
+}
+function openDoorPage(i) {
+  ui.page = i;
+  openSheet('journal');
 }
 function chooseDoor(i) {
   if (ui.adv.follow && followFrozen()) return toast(FROZEN_MSG());
@@ -427,7 +458,7 @@ function render() {
       Scene.mount(document.getElementById('scene-slot'));
       Room.mount(document.getElementById('room-slot'));
     }
-    if (!tabsFor().includes(ui.sheet)) ui.sheet = defaultTab();
+    if (!tabsFor().includes(ui.sheet) && !(EXTRA_SHEETS.includes(ui.sheet) && D() && S.phase !== 'matchEnd')) ui.sheet = defaultTab();
     const inRoom = viewMode() === 'room';
     document.getElementById('bar').innerHTML = renderBar();
     document.documentElement.style.setProperty('--bar-h', document.getElementById('bar').offsetHeight + 'px');
@@ -625,7 +656,7 @@ function partyRows() {
   });
   const rows = view.filter((a) => !a.left).map((a) => {
     const p = S.players.find((x) => x.id === a.id);
-    const pct = Math.max(0, Math.round((a.hp / cfg().START_HP) * 100));
+    const pct = Math.max(0, Math.min(100, Math.round((a.hp / maxHpOf(a)) * 100)));
     const cls = pct <= 30 ? 'low' : pct <= 60 ? 'mid' : '';
     let tag = '';
     if (!p.connected) tag = '<span class="tag">Away</span>';
@@ -634,7 +665,7 @@ function partyRows() {
       <span class="portrait">${a.alive ? Sprites.portrait(colorOf(a.id), a.affinity, 3) : Sprites.ghost(colorOf(a.id), 3).split('</svg>')[0] + '</svg>'}</span>
       <span class="pname"><span class="${a.alive ? '' : 'ghostname'}">${esc(pname(a.id))}</span>${tag}</span>
       <span class="stats">
-        ${a.alive ? `<span class="hpbar" title="${a.hp} HP"><b class="${cls}" style="width:${pct}%"></b></span><span>${a.hp}</span>` : '<span class="ghostname">Ghost</span>'}
+        ${a.alive ? `<span class="hpbar" title="${a.hp} of ${maxHpOf(a)} HP"><b class="${cls}" style="width:${pct}%"></b></span><span>${a.hp}</span>` : '<span class="ghostname">Ghost</span>'}
         <span class="gold">${Sprites.icon('coin', 2)} ${a.gold}</span>
         ${a.affinity ? `<span class="el-${a.affinity}">${cap(a.affinity)}</span>` : ''}
       </span>
@@ -654,9 +685,9 @@ function renderLeft() {
       <div class="win-title">Party</div>
       <p class="small dmline"><span class="tag host">DM</span> ${esc(pname(d.dmId))}</p>
       <ul class="party">${partyRows()}</ul>
-      <div class="wheel-mini" title="Each element beats the next one">
+      <button class="wheel-mini ${ui.sheet === 'elements' ? 'on' : ''}" data-act="elements" title="Elements: what each one resists, is weak to, and its perk" aria-pressed="${ui.sheet === 'elements'}">
         ${['water', 'fire', 'air', 'earth', 'water'].map((e) => `<span class="el-${e}">${Sprites.icon(e, 2)}<i>${cap(e)}</i></span>`).join('<span class="sep">›</span>')}
-      </div>
+      </button>
     </div>
     ${totals}`;
 }
@@ -674,6 +705,40 @@ const elementWarning = (clue, aff) => {
   return '';
 };
 
+/* ----- the Elements reference (opened from the element chain in the Party panel) ----- */
+// the wheel: each element beats the next one (Water beats Fire, Fire beats Air, Air beats Earth, Earth beats Water)
+const beatenBy = (e) => cfg().WEAK_TO[e];
+const beats = (e) => EL.find((x) => cfg().WEAK_TO[x] === e);
+function renderElements() {
+  const d = D();
+  const mine = d && d.role !== 'dm' && d.mine ? d.mine.affinity : null;
+  const isAdv = d && d.role !== 'dm' && d.advIds.includes(S.me);
+  const line = (e) => `<li class="el-row"><span class="el-name el-${e}">${Sprites.icon(e, 2)} ${cap(e)}</span> <span class="muted">· weak to ${cap(beatenBy(e))} ·</span> ${perkText(e)}</li>`;
+  let you = '';
+  let others;
+  if (mine) {
+    you = `<div class="el-you">
+      <div class="el-you-head">You: <b class="el-${mine}">${cap(mine)}</b> ${Sprites.icon(mine, 2)}</div>
+      <p>Resists ${cap(mine)} (½ damage) · Weak to ${cap(beatenBy(mine))} (×${cfg().WEAK})</p>
+      <p>Perk: ${perkText(mine)}</p>
+    </div>`;
+    // the one that beats you first, then the one you beat, then the last
+    others = [beatenBy(mine), beats(mine)];
+    others.push(EL.find((e) => e !== mine && !others.includes(e)));
+  } else {
+    if (isAdv && S.phase === 'setup') you = '<p class="muted small el-pick">You haven’t picked an element yet: Gear up.</p>';
+    others = ['water', 'fire', 'air', 'earth'];
+  }
+  const party = d.advs.filter((a) => !a.left).map((a) => `${esc(pname(a.id))} (${a.affinity ? cap(a.affinity) : 'picking'}${a.alive ? '' : ', ghost'})`).join(', ');
+  return `<div class="win elements-win">
+    ${you}
+    <div class="win-title">${mine ? 'Others' : 'Elements'}</div>
+    <ul class="el-list">${others.map(line).join('')}</ul>
+    <p class="small el-rule">Everyone resists their own element (½ damage) and is weak to the one that beats it (×${cfg().WEAK}). Water beats Fire, Fire beats Air, Air beats Earth, Earth beats Water.</p>
+    <p class="small el-party"><b>In this party:</b> ${party}</p>
+  </div>`;
+}
+
 /* ----- setup ----- */
 function renderSetup() {
   const d = D();
@@ -689,6 +754,7 @@ function renderSetup() {
     <button class="pbtn ${mine.affinity === e ? 'on' : ''}" data-act="aff" data-el="${e}" ${mine.setupReady ? 'disabled' : ''}>
       ${Sprites.icon(e, 2)} <span class="el-${e}">${cap(e)}</span>
       <span class="sub">Resist ${cap(e)}, weak to ${cap(c.WEAK_TO[e])}</span>
+      <span class="sub perk">${perkText(e, 'short')}</span>
     </button>`).join('');
   return `
     <div class="win"><div class="win-title">Your element <span class="muted">Everyone will see it</span></div><div class="seg">${aff}</div></div>
@@ -705,22 +771,29 @@ function renderShop() {
   const c = cfg();
   const mine = d.mine;
   const me = advOf(S.me);
+  const el = mine.affinity;
+  const off = perkOf(el, 'shopPrice', 1) < 1;
   const items = Object.entries(c.SHOP).map(([k, it]) => {
     const owned = k === 'potion' ? `${mine.potions} of ${c.POTION_CAP}` : mine.inv[k];
-    // prices rise every round; show next round's so buying early can be weighed
+    // prices rise every round; show next round's so buying early can be weighed. The server sends this
+    // adventurer's own prices (Fire's are discounted) and charges the same.
     const price = (d.prices && d.prices[k]) || it.cost;
     const next = d.nextPrices && d.nextPrices[k] > price ? d.nextPrices[k] : null;
+    // your element's own numbers in the item text (Water's Potion, Fire's Shove)
+    let text = it.text;
+    if (k === 'potion' && potionHealOf(el) !== c.POTION_HEAL) text = text.replace(`${c.POTION_HEAL} HP`, `${potionHealOf(el)} HP`);
+    if (k === 'shove' && perkOf(el, 'pickpocket', c.PICKPOCKET) !== c.PICKPOCKET) text = text.replace(`${Math.round(c.PICKPOCKET * 100)}%`, `${Math.round(perkOf(el, 'pickpocket') * 100)}%`);
     return `<div class="item" data-item="${k}">
       <div class="top"><span>${it.name}</span><span class="gold price">${Sprites.icon('coin', 2)} <b>${price}</b>${next ? `<span class="next-price" title="Next round’s price">→ ${next}</span>` : ''}</span></div>
-      <p>${it.text}</p>
+      <p>${text}</p>
       <div class="row">
         <button class="pbtn sm" data-act="buy" data-item="${k}" ${me.gold < price || (k === 'potion' && mine.potions >= c.POTION_CAP) ? 'disabled' : ''}>Buy</button>
         <span class="muted small">You have ${owned}</span>
-        ${k === 'potion' && mine.potions > 0 ? `<button class="pbtn sm" data-act="drink" ${me.hp >= c.START_HP ? 'disabled' : ''}>Drink</button>` : ''}
+        ${k === 'potion' && mine.potions > 0 ? `<button class="pbtn sm" data-act="drink" ${me.hp >= maxHpOf(me) ? 'disabled' : ''}>Drink</button>` : ''}
       </div>
     </div>`;
   }).join('');
-  return `<div class="shop-win"><div class="keeper-row"><span class="portrait">${Sprites.merchant(3)}</span><p class="small" style="margin:0">You have <span class="gold">${me.gold}</span> gold and ${me.hp} HP. Every item is single use and lasts the whole dungeon. Prices go up every round (the arrow shows next round’s). Gold you spend lowers your gain, so it counts for the DM.</p></div><div class="items">${items}</div></div>`;
+  return `<div class="shop-win"><div class="keeper-row"><span class="portrait">${Sprites.merchant(3)}</span><p class="small" style="margin:0">You have <span class="gold">${me.gold}</span> gold and ${me.hp} HP. Every item is single use and lasts the whole dungeon. Prices go up every round (the arrow shows next round’s). Gold you spend lowers your gain, so it counts for the DM.${off ? ` <b class="el-${el} shop-perk">${cap(el)}: ${Math.round((1 - perkOf(el, 'shopPrice')) * 100)}% off. These are your prices.</b>` : ''}</p></div><div class="items">${items}</div></div>`;
 }
 
 /* ----- action bar under the room ----- */
@@ -734,7 +807,9 @@ function renderHud() {
     const n = ui.near;
     if (n && n.type === 'door' && role === 'adv' && S.phase === 'adv') {
       const st = scanState(n.i);
-      btns.push(`<button class="pbtn gold act-btn" data-act="scanDoor" data-i="${n.i}" ${st.ok ? '' : 'disabled'}>${Sprites.icon('flask', 2)} ${st.label}</button>`);
+      // when it can't scan, the same button (and E) opens the door's journal page; it never chooses
+      if (st.ok || d.mine.scanning) btns.push(`<button class="pbtn gold act-btn" data-act="scanDoor" data-i="${n.i}" ${st.ok ? '' : 'disabled'}>${Sprites.icon('flask', 2)} ${st.label}</button>`);
+      else btns.push(`<button class="pbtn gold act-btn" data-act="doorPage" data-i="${n.i}" title="Open Door ${ROMAN[n.i]}’s page in your journal">${Sprites.icon('book', 2)} ${st.label} · Journal</button>`);
       btns.push(`<button class="pbtn" data-act="chooseDoor" data-i="${n.i}">Choose Door ${ROMAN[n.i]}</button>`);
     } else {
       let label = role === 'ghost' ? 'Float up to someone' : 'Walk up to something';
@@ -785,7 +860,10 @@ const TABS = {
   bribe: { label: 'Bribe', icon: () => Sprites.icon('bribe', 3) },
   statue: { label: 'Statue', icon: () => Sprites.icon('statue', 3) },
   offers: { label: 'Offers', icon: () => Sprites.icon('letter', 3) },
+  elements: { label: 'Elements', icon: () => '' }, // opened from the Party panel, not the sidebar
 };
+// screens that have no sidebar icon but can be open in any phase of a dungeon
+const EXTRA_SHEETS = ['elements'];
 function tabsFor() {
   const d = D();
   if (!d) return ['menu'];
@@ -833,6 +911,7 @@ function renderTab() {
   if (t === 'menu') body = renderMenu();
   else if (!d) body = '';
   else if (t === 'gear') body = renderSetup();
+  else if (t === 'elements') body = renderElements();
   else if (t === 'journal') body = renderBook();
   else if (t === 'shop') body = d.role === 'adv' && ['setup', 'dm', 'adv'].includes(S.phase) ? renderShop() : '<p class="muted">The shop is closed right now.</p>';
   else if (t === 'talk') body = renderTalk();
@@ -1249,7 +1328,7 @@ function renderAdventurer() {
       ${act ? `<div class="note">${esc(locked)} You can change it until time runs out.</div>` : ''}
       <div class="row" style="margin-top:14px">
         <button class="pbtn gold" data-act="lockIn" ${sel ? '' : 'disabled'}>${sel ? `${VERB[a.approach]} through door ${ROMAN[a.door]}` : 'Pick a door first'}</button>
-        <button class="pbtn" data-act="rest">Rest by the fire<span class="sub">+${c.REST_HEAL} HP, no gold</span></button>
+        <button class="pbtn" data-act="rest">Rest by the fire<span class="sub">+${restHealOf(mine.affinity)} HP, no gold</span></button>
       </div>
       ${others.length ? `<div class="win-title" style="margin-top:14px">Or follow someone <span class="muted">their final door and speed, secretly</span></div><div class="seg follow-btns">${followBtns}</div>${frozen ? `<p class="muted small" style="margin:6px 0 0">Following is frozen for the last ${c.FOLLOW_FREEZE} seconds.</p>` : ''}` : ''}
       <p class="muted small" style="margin:12px 0 0">Only the first ones in spring the trap. A room needs ${c.ROOM_BAGS} bags to empty; with more, the gold is split by bags. If time runs out, the plan you’ve picked counts even if you didn’t lock it in. With no door picked, you rest.</p>
@@ -1440,14 +1519,14 @@ function renderRules() {
       <li>Adventurers see each door’s gold. Its clue is hidden: walk up to a door and scan it with your lantern (one oil flask, 3 seconds, and only you see the result). A trapped door’s clue is its real element; an empty door is silent. A fake clue fakes either, and fools scans too.</li>
       <li>You get fresh oil each round, one flask fewer than there are doors, and unused oil doesn’t carry over, so there’s always a door you can’t scan. A Lens makes a scan show the real trap and its strength, even through a fake clue. It still takes a flask, and works once a round.</li>
       <li>The DM’s statue stands in the corner. Each round you can walk up and ask it one question: is Door X trapped, or trapped with a given element? The DM answers through it, truthfully or with a lie, but only has a few lies a round (1, or 2 with five or more adventurers). The answer arrives a few seconds later whatever the DM does, and is the truth if the DM doesn’t answer in time. Only you see it, and at the reveal you learn whether it lied to you.</li>
-      <li>Each adventurer secretly picks a door and how to go in, follows someone, or rests by the fire (+${c.REST_HEAL} HP). If time runs out, the plan you’ve picked counts even if you didn’t lock it in. Then the doors open one at a time, and after a short pause the next round starts on its own. History keeps every round’s story.</li>
+      <li>Each adventurer secretly picks a door and how to go in, follows someone, or rests by the fire (+${c.REST_HEAL} HP; Earth ${restHealOf('earth')}, Water ${restHealOf('water')}). If time runs out, the plan you’ve picked counts even if you didn’t lock it in. Then the doors open one at a time, and after a short pause the next round starts on its own. History keeps every round’s story.</li>
       <li>While the shop is open, you see other players’ gold and HP as they were when the DM started setting traps, so nobody can spot what you bought or drank. Real values show when the doors open.</li>
     </ul>
     <h3>Going in</h3>
     <ul>
       <li>Sprint: 3 bags, ×1.5 damage if first in. Walk: 2 bags, ×1. Sneak: 1 bag, ×0.5.</li>
       <li>Only the fastest group into a room springs the trap. Anyone slower behind them is safe.</li>
-      <li>A room needs ${c.ROOM_BAGS} bags to empty. With more, the gold (bait and hidden) splits by bags. With fewer, the rest stays with the DM.</li>
+      <li>A room needs ${c.ROOM_BAGS} bags to empty. With more, the gold (bait and hidden) splits by bags. With fewer, the rest stays with the DM. Air’s bags count ×${perkOf('air', 'loot', 1)}: walking alone, Air takes ${2 * perkOf('air', 'loot', 1)} of ${c.ROOM_BAGS} shares.</li>
     </ul>
     <h3>Following</h3>
     <ul>
@@ -1464,16 +1543,19 @@ function renderRules() {
     </ul>
     <h3>Elements</h3>
     <p>Your element halves damage from that element and adds 50% from the one that beats it. Water beats Fire, Fire beats Air, Air beats Earth, Earth beats Water. Doors show a Weak or Resist badge for you, so you don’t need to remember this.</p>
+    <p>Each element also has a perk that changes a few numbers (tap the element chain under the party to see them during a game):</p>
+    <ul class="rules-perks">${EL.map((e) => `<li><b class="el-${e}">${cap(e)}</b>: ${perkText(e)}.</li>`).join('')}</ul>
+    <p class="small muted">No perk lets anyone survive the DM’s hardest hit from full HP: a Deadly trap on a sprinter weak to it.</p>
     <h3>Items</h3>
-    <p class="small muted" style="margin-top:0">Single use, and they last the whole dungeon. The shop is open while the DM sets traps and while you choose. First-round prices: Shove ${price('shove')}, Charm ${price('charm')}, Potion ${price('potion')}, Lens ${price('lens')}, Armour ${price('armour')}, Lock ${price('lock')}. Inflation: prices rise every round, to ${Math.round(c.INFLATION * 100)}% more by the last round, so buying early is cheaper.</p>
+    <p class="small muted" style="margin-top:0">Single use, and they last the whole dungeon. The shop is open while the DM sets traps and while you choose. First-round prices: Shove ${price('shove')}, Charm ${price('charm')}, Potion ${price('potion')}, Lens ${price('lens')}, Armour ${price('armour')}, Lock ${price('lock')}. Inflation: prices rise every round, to ${Math.round(c.INFLATION * 100)}% more by the last round, so buying early is cheaper. Fire pays ${Math.round(perkOf('fire', 'shopPrice', 1) * 100)}% of every price (rounded).</p>
     <ul>
-      <li>Potion: +40 HP; you can carry ${c.POTION_CAP} at most. Armour: half damage this round. Charm: resist one element this round.</li>
+      <li>Potion: +${c.POTION_HEAL} HP (Water ${potionHealOf('water')}), up to your full HP; you can carry ${c.POTION_CAP} at most. Armour: half damage this round. Charm: resist one element this round.</li>
       <li>Lens: a scan with it shows the real trap, even through a fake clue. It needs a flask like any scan, and works once a round.</li>
       <li>Lock: you enter alone and take all the gold; anyone else on that door is locked out. You take ×${c.LOCK_MULT} damage.</li>
-      <li>Shove: if your target picks your door, they spring the trap alone at ×1.5, and you pickpocket ${Math.round(c.PICKPOCKET * 100)}% of their gold after the loot. Two shoves on each other: both go in. A Lock on that door beats a Shove.</li>
+      <li>Shove: if your target picks your door, they spring the trap alone at ×1.5, and you pickpocket ${Math.round(c.PICKPOCKET * 100)}% of their gold after the loot (Fire ${Math.round(perkOf('fire', 'pickpocket', c.PICKPOCKET) * 100)}%). Two shoves on each other: both go in. A Lock on that door beats a Shove.</li>
     </ul>
     <h3>Death and ghosts</h3>
-    <p>At 0 HP you drop half your gold and become a ghost. Ghosts see every trap and secretly haunt one adventurer each round. If a trap hurts that adventurer, the ghost steals 25% of their gold.</p>
+    <p>At 0 HP you drop half your gold and become a ghost (ghosts have no perks). Ghosts see every trap and secretly haunt one adventurer each round. If a trap hurts that adventurer, the ghost steals 25% of their gold.</p>
     <h3>What happens at each door, in order</h3>
     <p>Bribes are paid, then trap damage, then the loot (anyone killed gets none), then pickpocketing, then haunts, then deaths drop half their gold.</p>
     <h3>Scoring</h3>
@@ -1509,7 +1591,8 @@ function formatLog(log) {
   L(`Started ${new Date(log.started).toLocaleString()}${log.finished ? `, finished ${new Date(log.finished).toLocaleString()}` : ''}`);
   L(`Players: ${log.players.join(', ')}`);
   L(`Settings: ${log.settings.rounds} rounds per dungeon, ${log.settings.pace} pace`);
-  L(`Rules: ${log.config.startHp} HP and ${log.config.startGold} gold to start. Traps (from the DM's purse): ${Object.values(log.config.traps).map((t) => `${t.name} ${t.dmg} dmg for ${t.cost} gold`).join(', ')}. Fake clue ${log.config.illusionCost} gold. Shop prices rise ${Math.round((log.config.inflation || 0) * 100)}% by the last round. Pickpocket ${Math.round((log.config.pickpocket || 0) * 100)}%.`);
+  L(`Rules: ${log.config.startHp} HP and ${log.config.startGold} gold to start. Traps (from the DM's purse): ${Object.values(log.config.traps).map((t) => `${t.name} ${t.dmg} dmg for ${t.cost} gold`).join(', ')}. Fake clue ${log.config.illusionCost} gold. Shop prices rise ${Math.round((log.config.inflation || 0) * 100)}% by the last round. Pickpocket ${Math.round((log.config.pickpocket || 0) * 100)}%.${log.config.lockMult ? ` Lock ×${log.config.lockMult} damage.` : ''}`);
+  if (log.config.perks) L(`Perks: ${Object.entries(log.config.perks).map(([el, p]) => `${cap(el)} ${perkLogText(p)}`).join('; ')}.`);
   L(`Shop: ${Object.entries(log.config.shop).map(([k, v]) => `${k} ${v}`).join(', ')}`);
   if (log.totals) {
     L();
@@ -1600,8 +1683,21 @@ function formatLog(log) {
   }
   return out.join('\n') + '\n';
 }
+// one element's perk numbers for the text log (from the log's own config, so old logs read the same)
+function perkLogText(p) {
+  const parts = [];
+  if (p.maxHp !== undefined) parts.push(`${p.maxHp} HP`);
+  if (p.loot !== undefined) parts.push(`loot ×${p.loot}`);
+  if (p.damage !== undefined) parts.push(`damage taken ×${p.damage}`);
+  if (p.rest !== undefined) parts.push(`rest heals ${p.rest}`);
+  if (p.potion !== undefined) parts.push(`Potion heals ${p.potion}`);
+  if (p.pickpocket !== undefined) parts.push(`Shoves steal ${Math.round(p.pickpocket * 100)}%`);
+  if (p.shopPrice !== undefined) parts.push(`pays ${Math.round(p.shopPrice * 100)}% in the shop`);
+  return parts.join(', ');
+}
 function shopLine(e) {
   if (e.bought) return `${e.player} bought ${e.bought} (${e.cost})`;
+  if (e.repriced) return `${e.player} switched from ${e.from || 'no element'} to ${e.to}: ${e.change > 0 ? 'paid' : 'got back'} ${Math.abs(e.change)} on ${e.repriced.join(', ')}`;
   if (e.drank) return `${e.player} drank a potion (${e.hpBefore} to ${e.hpAfter} HP)`;
   if (e.usedLens) return `${e.player} used a lens on door ${e.usedLens} and saw ${e.saw}`;
   if (e.scanned) return `${e.player} scanned door ${e.scanned}${e.lens ? ' with a Lens' : ''} and saw ${e.saw}`;
@@ -1677,7 +1773,12 @@ document.addEventListener('click', (e) => {
     case 'tutNext': case 'tutPrev': case 'tutGo': case 'tutClose': case 'tutDone':
       Tutorial.handle(act, i); render(); break;
     case 'closeRules': ui.rules = false; render(); break;
-    case 'aff': socket.emit('affinity', { element: t.dataset.el }); break;
+    case 'aff':
+      socket.emit('affinity', { element: t.dataset.el }, (r) => {
+        ack(r);
+        if (r && r.change) toast(r.change > 0 ? `What you bought cost ${r.change} more as ${cap(t.dataset.el)}.` : `Fire’s discount: ${-r.change} gold back on what you bought.`, 'info');
+      });
+      break;
     case 'setupReady': socket.emit('setupReady'); Sound.play('lockIn'); break;
     case 'buy': socket.emit('buy', { item: t.dataset.item }, (r) => { ack(r); if (r && r.ok) Sound.play('coins', 2); }); break;
     case 'drink': socket.emit('drink', null, (r) => { ack(r); if (r && r.ok) Sound.play('heal'); }); break;
@@ -1762,6 +1863,8 @@ document.addEventListener('click', (e) => {
     case 'sheetClose': ui.sheet = null; render(); break;
     case 'roomAct': roomAction(); break;
     case 'scanDoor': startScan(i); break;
+    case 'doorPage': openDoorPage(i); break;
+    case 'elements': ui.sheet = ui.sheet === 'elements' ? defaultTab() : 'elements'; render(); Sound.play('click'); break;
     case 'chooseDoor': chooseDoor(i); break;
     case 'scanStop': socket.emit('scanCancel'); break;
     case 'lensToggle': ui.useLens = !ui.useLens; renderHudOnly(); break;

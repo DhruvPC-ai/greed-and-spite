@@ -256,7 +256,8 @@ const Room = (() => {
       ac.ghost = !a.alive;
       if (a.alive) ac.element = a.affinity;
       ac.hp.hidden = !a.alive;
-      const pct = Math.max(0, Math.min(100, a.hp));
+      // bars are against each adventurer's own max HP (Water has 110)
+      const pct = Math.max(0, Math.min(100, Math.round((a.hp / (a.maxHp || S.config.START_HP)) * 100)));
       ac.hp.firstElementChild.style.width = pct + '%';
       ac.hp.firstElementChild.className = pct <= 30 ? 'low' : pct <= 60 ? 'mid' : '';
       ac.bubble.hidden = !((phase === 'setup' || phase === 'adv') && a.ready && a.id !== S.me);

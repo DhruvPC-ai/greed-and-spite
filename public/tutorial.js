@@ -101,7 +101,7 @@ const Tutorial = (() => {
     {
       key: 'elements',
       title: 'Elements',
-      text: 'Each element beats the next one around the circle. You resist your own element and are weak to the one that beats it. Doors warn you, so you don’t need to memorise this.',
+      text: 'Each element beats the next one around the circle. You resist your own element and are weak to the one that beats it, and doors warn you. Each element also has a perk; in a game, tap the element chain under the party to see them.',
       art: () => `
         <div class="trow end">
           <div class="twheel">
@@ -111,9 +111,11 @@ const Tutorial = (() => {
             <span class="w-w">${I('earth', 4)}<i>Earth</i></span>
             <span class="w-arrow a1">➜</span><span class="w-arrow a2">➜</span><span class="w-arrow a3">➜</span><span class="w-arrow a4">➜</span>
           </div>
-          <div class="tcol tight">
-            ${door({ gold: 25, clue: 'fire', label: 'Smoke', warn: 'weak' })}
-            <div class="tcaption">You’re Air, so a Fire door warns you</div>
+          <div class="tcol tight left tperks">
+            ${tag(`${I('air', 2)}<span class="el-air">Air</span> more loot, more hurt`)}
+            ${tag(`${I('earth', 2)}<span class="el-earth">Earth</span> tough, slow to heal`)}
+            ${tag(`${I('water', 2)}<span class="el-water">Water</span> 110 HP, heals more`)}
+            ${tag(`${I('fire', 2)}<span class="el-fire">Fire</span> steals more, shops cheap`)}
           </div>
         </div>`,
     },
@@ -137,7 +139,7 @@ const Tutorial = (() => {
       art: () => `
         <div class="tcol tight left">
           <div class="tline">${adv(2, 'air', 3)}<span class="tarrow">➜</span>${adv(1, 'water', 3)}<span class="tfloat gold">+5</span><span class="tfloat dmg">−5</span><span class="tnote">Shoved in first, pockets picked</span></div>
-          <div class="tline">${adv(3, 'earth', 3)}${I('lock', 3)}<span class="tnote">Locked in alone: all the gold, 2.5× damage</span></div>
+          <div class="tline">${adv(3, 'earth', 3)}${I('lock', 3)}<span class="tnote">Locked in alone: all the gold, 2× damage</span></div>
         </div>`,
     },
     {

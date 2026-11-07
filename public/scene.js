@@ -265,7 +265,8 @@ const Scene = (() => {
   }
   function setHp(a, hp, alive) {
     a.hp.hidden = !alive;
-    const pct = Math.max(0, Math.min(100, hp));
+    // against the adventurer's own max HP (Water has 110); set from the state as actors are drawn
+    const pct = Math.max(0, Math.min(100, Math.round((hp / (a.maxHp || 100)) * 100)));
     const b = a.hp.firstElementChild;
     b.style.width = pct + '%';
     b.className = pct <= 30 ? 'low' : pct <= 60 ? 'mid' : '';
@@ -697,6 +698,7 @@ const Scene = (() => {
       let pos = alive ? geom.hall[a.id] : ghostHome(a.id);
       if (roamPhase && d.pos && d.pos[a.id]) pos = roamPx(a.id, d.pos[a.id], alive);
       const ac = makeActor(a.id, nameOf(a.id), colorOf(a.id), a.affinity, alive, pos);
+      ac.maxHp = a.maxHp;
       setHp(ac, inReveal ? r.before[a.id].hp : a.hp, alive);
     });
     inner.appendChild(fx);
@@ -762,6 +764,7 @@ const Scene = (() => {
       const ac = actors[a.id];
       if (!ac) return;
       if (a.alive && ac.element !== a.affinity) { ac.element = a.affinity; drawSprite(ac); }
+      ac.maxHp = a.maxHp;
       setHp(ac, a.hp, a.alive);
       // your own sprite skips the bubble: the panel already says you're locked in
       const showReady = (phase === 'setup' || phase === 'adv') && a.ready && a.id !== S.me;
